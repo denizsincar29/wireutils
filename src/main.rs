@@ -35,6 +35,7 @@ Commands:
   apply [--dry-run]        write the list into every .conf in the folder
   templates [QUERY]        list the catalog, or search it
   templates-update [URL]   fetch a newer catalog from the internet
+  gui                      open the window (only when built with --features gui)
 
 Options:
   -g, --group <name>       group to put a newly added host in
@@ -105,6 +106,29 @@ fn take_groups(args: &[String]) -> (Vec<String>, Vec<String>) {
 
 fn run(args: &[String]) -> Result<(), String> {
     let cmd = args[0].as_str();
+
+    // The window is the same application with a different front end, so it is
+    // handled before anything is read from disk — the GUI does its own
+    // loading, and asking it to open a store first would mean opening
+    // hosts.json twice.
+    if cmd == "gui" {
+        #[cfg(feature = "gui")]
+        {
+            let code = wireutils::gui::run();
+            if code != 0 {
+                return Err(format!("the window exited with status {code}"));
+            }
+            return Ok(());
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            return Err(
+                "this build has no window — rebuild with: cargo build --release --features gui"
+                    .to_string(),
+            );
+        }
+    }
+
     let (groups, rest) = take_groups(&args[1..]);
     let (store, path) = load()?;
 
