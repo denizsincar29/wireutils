@@ -1,0 +1,81 @@
+name: core
+
+# The half of the crate that can be checked anywhere. `gui-check` type-checks
+# the wx front end on Windows; this runs the logic — the 82 tests over
+# `wgconf`, `hosts`, `resolve`, `templates`, `apply` and `import` — on both
+# platforms the owner actually uses.
+#
+# It used to have no CI at all: the only workflow did `cargo check --features
+# gui`, which does not build the test harness, so a broken test could sit in
+# the tree indefinitely and the agent would still report everything green.
+#
+# Unlike `gui-check` this one IS a gate: tests are deterministic and offline
+# by design (fake resolvers, temp folders), so a failure here means the code
+# is wrong rather than that a network happened to be down.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["core", "main"]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: cargo test --lib
+        id: lib
+        shell: bash
+        # pipefail for the same reason as in gui-check: `tee` on its own
+        # reports the exit code of `tee`, which is always zero.
+        run: |
+          set -o pipefail
+          cargo test --lib 2>&1 | tee test-lib.log
+
+      - name: cargo test --doc
+        id: doc
+        shell: bash
+        if: always()
+        run: |
+          set -o pipefail
+          cargo test --doc 2>&1 | tee test-doc.log
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### cargo test — ${{ matrix.os }}"
+            echo
+            echo '```'
+            tail -n 60 test-lib.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-test-log-${{ matrix.os }}
+          path: |
+            test-lib.log
+            test-doc.log
+          if-no-files-found: warn
