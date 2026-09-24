@@ -38,10 +38,16 @@ pub struct Report {
 
 impl Report {
     pub fn written(&self) -> usize {
-        self.files.iter().filter(|(_, r)| matches!(r, FileResult::Written { .. })).count()
+        self.files
+            .iter()
+            .filter(|(_, r)| matches!(r, FileResult::Written { .. }))
+            .count()
     }
     pub fn unchanged(&self) -> usize {
-        self.files.iter().filter(|(_, r)| *r == FileResult::Unchanged).count()
+        self.files
+            .iter()
+            .filter(|(_, r)| *r == FileResult::Unchanged)
+            .count()
     }
 }
 
@@ -78,7 +84,11 @@ pub fn conf_files(dir: &Path) -> Result<Vec<PathBuf>> {
 /// this whole program exists to prevent. A name must never be written as an
 /// address, however plausible it looks.
 pub fn value_or_error(store: &HostStore) -> Result<String> {
-    let missing: Vec<&str> = store.unresolved().iter().map(|h| h.target.as_str()).collect();
+    let missing: Vec<&str> = store
+        .unresolved()
+        .iter()
+        .map(|h| h.target.as_str())
+        .collect();
     if !missing.is_empty() {
         return Err(Error::Invalid(format!(
             "these hosts have no addresses yet, run `resolve` first: {}",
@@ -99,7 +109,11 @@ pub fn value_or_error(store: &HostStore) -> Result<String> {
         .hosts
         .iter()
         .flat_map(|h| h.allowed_entries())
-        .filter(|entry| !entry.trim_end_matches(|c| c == '0' || c == '/' || c == ':').is_empty())
+        .filter(|entry| {
+            !entry
+                .trim_end_matches(|c| c == '0' || c == '/' || c == ':')
+                .is_empty()
+        })
         .filter(|entry| {
             let bare = entry.split('/').next().unwrap_or(entry);
             !crate::hosts::is_address(entry) && !crate::hosts::is_address(bare)
@@ -125,7 +139,10 @@ pub fn apply(store: &HostStore, dir: &Path) -> Result<Report> {
 
 /// Apply an explicit value, for tests and for `apply --dry-run` output.
 pub fn apply_value(dir: &Path, value: &str) -> Result<Report> {
-    let mut report = Report { files: Vec::new(), errors: Vec::new() };
+    let mut report = Report {
+        files: Vec::new(),
+        errors: Vec::new(),
+    };
     for path in conf_files(dir)? {
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
@@ -292,7 +309,10 @@ mod tests {
         let report = apply(&store, &dir).unwrap();
         assert_eq!(report.written(), 1);
         let t = std::fs::read_to_string(dir.join("a.conf")).unwrap();
-        assert!(t.contains("AllowedIPs = 1.2.3.4/32, 5.6.7.8/32, 9.9.9.9/32"), "{t}");
+        assert!(
+            t.contains("AllowedIPs = 1.2.3.4/32, 5.6.7.8/32, 9.9.9.9/32"),
+            "{t}"
+        );
     }
 
     #[test]

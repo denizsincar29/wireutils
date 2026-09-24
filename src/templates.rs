@@ -65,8 +65,7 @@ impl Catalog {
     /// starts with the needle beats one that merely contains it.
     pub fn search(&self, needle: &str) -> Vec<&Template> {
         let n = needle.trim().to_lowercase();
-        let mut hits: Vec<&Template> =
-            self.templates.iter().filter(|t| t.matches(&n)).collect();
+        let mut hits: Vec<&Template> = self.templates.iter().filter(|t| t.matches(&n)).collect();
         hits.sort_by_key(|t| {
             let name = t.name.to_lowercase();
             if name == n {
@@ -89,7 +88,9 @@ impl Catalog {
     /// Add a template's domains to the store as one group, seeding the
     /// addresses it ships with so an offline apply still covers the site.
     pub fn apply(&self, store: &mut HostStore, name: &str) -> Result<usize, String> {
-        let t = self.get(name).ok_or_else(|| format!("no template named {name}"))?;
+        let t = self
+            .get(name)
+            .ok_or_else(|| format!("no template named {name}"))?;
         store.ensure_group(&t.name);
         let mut added = 0;
         for domain in &t.domains {
@@ -140,7 +141,9 @@ pub fn fetch(url: &str) -> Result<Catalog, String> {
 /// an empty one.
 pub fn parse(text: &str) -> Result<Catalog, String> {
     let mut catalog: Catalog = serde_json::from_str(text).map_err(|e| e.to_string())?;
-    catalog.templates.retain(|t| !t.name.trim().is_empty() && !t.domains.is_empty());
+    catalog
+        .templates
+        .retain(|t| !t.name.trim().is_empty() && !t.domains.is_empty());
     if catalog.templates.is_empty() {
         return Err("catalog has no usable templates".to_string());
     }
@@ -270,10 +273,9 @@ mod tests {
     #[test]
     fn an_update_cannot_delete_a_builtin_group() {
         let builtin = catalog();
-        let updated: Catalog = serde_json::from_str(
-            r#"{"templates":[{"name":"chatgpt","domains":["chatgpt.com"]}]}"#,
-        )
-        .unwrap();
+        let updated: Catalog =
+            serde_json::from_str(r#"{"templates":[{"name":"chatgpt","domains":["chatgpt.com"]}]}"#)
+                .unwrap();
         let merged = merge(updated, builtin);
         assert!(merged.get("chatgpt").is_some());
         assert_eq!(merged.get("chatgpt").unwrap().domains, vec!["chatgpt.com"]);
@@ -284,7 +286,11 @@ mod tests {
     #[test]
     fn the_builtin_catalog_is_valid_and_searchable() {
         let c = builtin();
-        assert!(c.templates.len() >= 8, "only {} templates", c.templates.len());
+        assert!(
+            c.templates.len() >= 8,
+            "only {} templates",
+            c.templates.len()
+        );
         assert!(c.search("instagr").iter().any(|t| t.name == "instagram"));
         assert!(c.search("openai").iter().any(|t| t.name == "chatgpt"));
         for t in &c.templates {
@@ -300,7 +306,11 @@ mod tests {
         let dir = std::env::temp_dir().join("wireutils_catalog_test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("catalog.json");
-        std::fs::write(&path, r#"{"templates":[{"name":"ok","domains":["a.com"]}]}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"templates":[{"name":"ok","domains":["a.com"]}]}"#,
+        )
+        .unwrap();
         let c = fetch(path.to_str().unwrap()).unwrap();
         assert_eq!(c.templates.len(), 1);
     }

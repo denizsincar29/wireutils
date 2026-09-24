@@ -68,7 +68,9 @@ fn load() -> Result<(HostStore, PathBuf), String> {
     if !path.exists() {
         return Ok((HostStore::default(), path));
     }
-    HostStore::load(&path).map(|s| (s, path)).map_err(|e| e.to_string())
+    HostStore::load(&path)
+        .map(|s| (s, path))
+        .map_err(|e| e.to_string())
 }
 
 fn save(store: &HostStore, path: &PathBuf) -> Result<(), String> {
@@ -294,14 +296,19 @@ fn run(args: &[String]) -> Result<(), String> {
         }
 
         "import" => {
-            let file = rest.first().ok_or("import needs the path to a .conf file")?;
+            let file = rest
+                .first()
+                .ok_or("import needs the path to a .conf file")?;
             let path_in = PathBuf::from(file);
             let names = PtrResolver;
             let imported = import::from_config(&path_in, &names)?;
             let mut store = store;
             match imported {
                 Imported::FullTunnel => {
-                    println!("{}: full tunnel (0.0.0.0/0) — nothing to import", path_in.display());
+                    println!(
+                        "{}: full tunnel (0.0.0.0/0) — nothing to import",
+                        path_in.display()
+                    );
                     println!("a config that takes every address has no site list to take");
                 }
                 Imported::Nothing => {

@@ -197,10 +197,7 @@ pub fn subnet_of(addr: &str) -> Option<String> {
         }
         std::net::IpAddr::V6(v6) => {
             let seg = v6.segments();
-            Some(format!(
-                "{:x}:{:x}:{:x}::/48",
-                seg[0], seg[1], seg[2]
-            ))
+            Some(format!("{:x}:{:x}:{:x}::/48", seg[0], seg[1], seg[2]))
         }
     }
 }
@@ -212,7 +209,10 @@ pub fn is_subnet_label(label: &str) -> bool {
         .split_once('/')
         .map(|(ip, prefix)| {
             ip.parse::<std::net::IpAddr>().is_ok()
-                && prefix.parse::<u8>().map(|n| n < 32 || n < 128).unwrap_or(false)
+                && prefix
+                    .parse::<u8>()
+                    .map(|n| n < 32 || n < 128)
+                    .unwrap_or(false)
         })
         .unwrap_or(false)
 }
@@ -322,10 +322,7 @@ pub fn apply_import(store: &mut HostStore, hosts: Vec<Host>, group: Option<&str>
 
 /// Read a base config and produce the candidate list. Split out from the
 /// store so the caller can show it before anything is changed.
-pub fn from_config<R: NameResolver>(
-    path: &std::path::Path,
-    names: &R,
-) -> Result<Imported, String> {
+pub fn from_config<R: NameResolver>(path: &std::path::Path, names: &R) -> Result<Imported, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let conf = crate::wgconf::WgConfig::parse(&text);
     // Every `AllowedIPs` line contributes; a multi-peer config is imported
@@ -384,10 +381,8 @@ mod tests {
 
     #[test]
     fn addresses_sharing_a_name_become_one_host() {
-        let imported = hosts_from_value(
-            "31.13.64.1/32, 31.13.64.2/32, 157.240.205.174/32",
-            &fake(),
-        );
+        let imported =
+            hosts_from_value("31.13.64.1/32, 31.13.64.2/32, 157.240.205.174/32", &fake());
         let Imported::Hosts(hosts) = imported else {
             panic!("expected hosts")
         };
@@ -400,15 +395,17 @@ mod tests {
     fn an_address_with_no_ptr_falls_back_to_its_subnet() {
         // The hybrid: no name, but neighbours in the same /24 are still one
         // thing the table can show.
-        let Imported::Hosts(hosts) =
-            hosts_from_value("203.0.113.9/32, 203.0.113.10/32", &fake())
+        let Imported::Hosts(hosts) = hosts_from_value("203.0.113.9/32, 203.0.113.10/32", &fake())
         else {
             panic!("expected hosts")
         };
         assert_eq!(hosts.len(), 1);
         assert_eq!(hosts[0].target, "203.0.113.0/24");
         assert!(is_subnet_label(&hosts[0].target));
-        assert_eq!(hosts[0].allowed_entries(), vec!["203.0.113.9/32", "203.0.113.10/32"]);
+        assert_eq!(
+            hosts[0].allowed_entries(),
+            vec!["203.0.113.9/32", "203.0.113.10/32"]
+        );
     }
 
     #[test]
@@ -416,8 +413,7 @@ mod tests {
         // One address has a PTR answer, one does not. They must not become
         // two hosts: the named one wins the whole network.
         let names = FakeNames::new(&[("31.13.64.2", "instagram.com")]);
-        let Imported::Hosts(hosts) =
-            hosts_from_value("31.13.64.1/32, 31.13.64.2/32", &names)
+        let Imported::Hosts(hosts) = hosts_from_value("31.13.64.1/32, 31.13.64.2/32", &names)
         else {
             panic!("expected hosts")
         };
@@ -579,7 +575,10 @@ mod tests {
 
     #[test]
     fn an_ipv6_address_falls_back_to_a_48() {
-        assert_eq!(subnet_of("2001:db8:1234::5"), Some("2001:db8:1234::/48".to_string()));
+        assert_eq!(
+            subnet_of("2001:db8:1234::5"),
+            Some("2001:db8:1234::/48".to_string())
+        );
         assert_eq!(subnet_of("10.1.2.3"), Some("10.1.2.0/24".to_string()));
     }
 
@@ -639,7 +638,10 @@ mod tests {
             !written.contains("31.13.64.0/24") && !written.contains("198.51.100.0/24"),
             "no subnet route may appear: {written}"
         );
-        assert!(store.hosts[0].label().ends_with("/24"), "the label still shows the network");
+        assert!(
+            store.hosts[0].label().ends_with("/24"),
+            "the label still shows the network"
+        );
     }
 
     #[test]

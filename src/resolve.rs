@@ -52,7 +52,10 @@ impl FakeResolver {
             table: table
                 .iter()
                 .map(|(d, ips)| {
-                    (d.to_string(), Ok(ips.iter().map(|s| s.to_string()).collect()))
+                    (
+                        d.to_string(),
+                        Ok(ips.iter().map(|s| s.to_string()).collect()),
+                    )
                 })
                 .collect(),
         }
@@ -93,7 +96,11 @@ pub enum Outcome {
 /// `force` re-resolves even hosts that already have addresses: a CDN's
 /// addresses change, and "I added the site last week, why is it blocked" is
 /// answered by this flag.
-pub fn resolve_all<R: Resolver>(store: &mut HostStore, resolver: &R, force: bool) -> Vec<(String, Outcome)> {
+pub fn resolve_all<R: Resolver>(
+    store: &mut HostStore,
+    resolver: &R,
+    force: bool,
+) -> Vec<(String, Outcome)> {
     let mut out = Vec::new();
     for host in &mut store.hosts {
         if host.is_literal_ip() {
@@ -124,7 +131,9 @@ pub fn resolve_all<R: Resolver>(store: &mut HostStore, resolver: &R, force: bool
 
 fn dedup(ips: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
-    ips.into_iter().filter(|ip| seen.insert(ip.clone())).collect()
+    ips.into_iter()
+        .filter(|ip| seen.insert(ip.clone()))
+        .collect()
 }
 
 /// Cache the addresses a group is known to answer on, so they are available

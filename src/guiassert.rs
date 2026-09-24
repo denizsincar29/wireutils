@@ -21,7 +21,7 @@
 //! in the ordinary test job either, which builds without the feature.
 
 use wxdragon::prelude::*;
-use wxdragon::widgets::{StatusBar, StatusBarStyle};
+use wxdragon::widgets::statusbar::StatusBarStyle;
 
 /// Panes in the status bar. One: the whole message is the text, and a window
 /// that splits the last line into panes reads worse aloud than a single
@@ -36,11 +36,11 @@ pub const STATUS_PRIMARY_FIELD: usize = STATUS_FIELDS - 1;
 /// The status bar this app builds on `frame`.
 ///
 /// Built through the builder rather than `Frame::create_status_bar`: the raw
-/// call has neither `StatusBarStyle` nor `ID_NONE` in the wxdragon prelude
-/// (both live only in `widgets::statusbar` and `id`) and it returns the bar
-/// without attaching it to the frame, so a later `set_status_text` on the
-/// frame would aim at a window that has none. The builder creates,
-/// configures and attaches.
+/// call has neither `StatusBarStyle` nor `ID_NONE` in the wxdragon prelude —
+/// the style is not re-exported one level up either, so it has to be named as
+/// `widgets::statusbar::StatusBarStyle` — and it returns the bar without
+/// attaching it to the frame, so a later `set_status_text` on the frame would
+/// aim at a window that has none. The builder creates, configures and attaches.
 ///
 /// The field count here is `STATUS_FIELDS` for a reason: this function is the
 /// single place the bar is created, so the guard in the tests below is

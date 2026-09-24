@@ -68,7 +68,11 @@ impl WgConfig {
                 }
             })
             .collect();
-        WgConfig { lines, eol, trailing_newline }
+        WgConfig {
+            lines,
+            eol,
+            trailing_newline,
+        }
     }
 
     /// Every `AllowedIPs` value in the file, in order, as written (so a value
@@ -87,7 +91,9 @@ impl WgConfig {
 
     /// True when the file has at least one `AllowedIPs` line to write into.
     pub fn has_allowed_ips(&self) -> bool {
-        self.lines.iter().any(|l| matches!(l, Line::AllowedIps { .. }))
+        self.lines
+            .iter()
+            .any(|l| matches!(l, Line::AllowedIps { .. }))
     }
 
     /// Replace every `AllowedIPs` value with `value`.

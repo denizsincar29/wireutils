@@ -73,7 +73,11 @@ impl Host {
         let target = target.into();
         let is_ip = is_address(&target);
         Host {
-            ips: if is_ip { vec![target.clone()] } else { Vec::new() },
+            ips: if is_ip {
+                vec![target.clone()]
+            } else {
+                Vec::new()
+            },
             target,
             groups: Vec::new(),
             source: Source::Manual,
@@ -275,12 +279,7 @@ impl HostStore {
     ///
     /// An existing host of the same name absorbs the addresses rather than
     /// being duplicated, and keeps the groups it already had.
-    pub fn add_address(
-        &mut self,
-        target: &str,
-        ips: &[String],
-        groups: &[String],
-    ) -> &mut Host {
+    pub fn add_address(&mut self, target: &str, ips: &[String], groups: &[String]) -> &mut Host {
         for g in groups {
             self.ensure_group(g);
         }
@@ -387,7 +386,9 @@ impl HostStore {
 
     /// Hosts in a group, in list order.
     pub fn hosts_in_group<'a>(&'a self, group: &'a str) -> impl Iterator<Item = &'a Host> {
-        self.hosts.iter().filter(move |h| h.groups.iter().any(|g| g == group))
+        self.hosts
+            .iter()
+            .filter(move |h| h.groups.iter().any(|g| g == group))
     }
 
     /// The value for `AllowedIPs`: every address of every host, deduplicated,

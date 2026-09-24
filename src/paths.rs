@@ -61,7 +61,10 @@ mod tests {
     fn the_env_override_wins() {
         let old = std::env::var("WIREUTILS_CONFIG_DIR").ok();
         std::env::set_var("WIREUTILS_CONFIG_DIR", "/tmp/wireutils_cfg_test");
-        assert_eq!(config_dir().unwrap(), PathBuf::from("/tmp/wireutils_cfg_test"));
+        assert_eq!(
+            config_dir().unwrap(),
+            PathBuf::from("/tmp/wireutils_cfg_test")
+        );
         assert_eq!(
             store_path().unwrap(),
             PathBuf::from("/tmp/wireutils_cfg_test/hosts.json")
