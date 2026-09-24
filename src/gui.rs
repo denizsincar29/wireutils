@@ -139,6 +139,18 @@ fn start(_app: &App) -> i32 {
         .with_size(Size::new(980, 680))
         .build();
 
+    // The status bar exists before anything can write to it. It did not, and
+    // every `set_status` call went to a frame that had none: wxWidgets asserts
+    // `m_frameStatusBar != nullptr` in `SetStatusText`, which aborts the app on
+    // a debug build and does nothing at all on a release one. So the bottom
+    // line of the window was the only channel on Windows, and that is exactly
+    // the channel a screen reader reads after a button press.
+    //
+    // Created with one field: the text is the whole message here, and a window
+    // that splits it into panes reads worse aloud than a single full-width
+    // line.
+    frame.create_status_bar(1, StatusBarStyle::Default as i64, ID_NONE, "statusbar");
+
     let ui = build_body(&frame, &shared);
     frame.centre();
     frame.show(true);
