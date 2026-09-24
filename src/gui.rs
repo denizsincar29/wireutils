@@ -85,18 +85,16 @@ pub fn run() -> i32 {
 /// Build the window and run the event loop. The frame has to exist before any
 /// dialog is shown, so the dialogs that report a startup failure are parented
 /// to the frame and shown from inside the loop rather than before it.
-fn start(app: &App) -> i32 {
+fn start(_app: &App) -> i32 {
+    // A startup failure is reported the only way that is possible before the
+    // frame exists: on stderr. `start` used to put up a `MessageDialog` here
+    // -- one of the two calls that never compiled, because it was parented to
+    // a "desktop window" that wxdragon does not have. A modal before the main
+    // loop has started would not be pumped anyway.
     let config_path = match paths::store_path() {
         Some(p) => p,
         None => {
-            let dlg = MessageDialog::builder(
-                &unsafe { wxdragon::window::Window::get_desktop_window() },
-                "Could not work out where to keep hosts.json.",
-                "wireutils",
-            )
-            .with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
-            .build();
-            dlg.show_modal();
+            eprintln!("wireutils: could not work out where to keep hosts.json.");
             return 1;
         }
     };
@@ -109,19 +107,12 @@ fn start(app: &App) -> i32 {
             Err(e) => {
                 // A corrupt hosts.json is the owner's only copy of their list,
                 // so it is never overwritten silently: say where it is and
-                // stop. He can fix the file by hand and start again.
-                let msg = format!(
-                    "Could not read {}\n\n{e}\n\nFix or move the file, then start again.",
+                // stop. He can fix the file by hand and start again. The frame
+                // does not exist yet, so this one goes to stderr as well.
+                eprintln!(
+                    "wireutils: could not read {}\n\n{e}\n\nFix or move the file, then start again.",
                     config_path.display()
                 );
-                let dlg = MessageDialog::builder(
-                    &unsafe { wxdragon::window::Window::get_desktop_window() },
-                    &msg,
-                    "wireutils",
-                )
-                .with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
-                .build();
-                dlg.show_modal();
                 return 1;
             }
         }
@@ -189,7 +180,8 @@ fn start(app: &App) -> i32 {
     // one that appears a moment later.
     frame.set_menu_bar(build_menu(&frame, &ui, &shared));
 
-    app.run();
+    // No loop is started here. `wxdragon::main` runs it after this closure
+    // returns; an `app.run()` of our own would be a second, nested loop.
     0
 }
 
@@ -265,7 +257,10 @@ impl Ui {
 /// the same handlers the buttons use — there is exactly one implementation of
 /// "write to the configs", shared by the button and the menu item.
 fn build_menu(frame: &Frame, ui: &Ui, shared: &Shared) -> MenuBar {
-    let pick = MenuBar::builder()
+    // The bar is not `Clone` in wxdragon 0.9, so there is exactly one binding
+    // and the handler goes on it: `on_menu_selected` takes `&self` and returns
+    // nothing, which leaves the value usable as the return value below.
+    let mut menu_bar = MenuBar::builder()
         .append(
             Menu::builder()
                 .append_item(ID_PICK_DIR, "Config folder…", "Choose the folder of .conf files")
@@ -284,7 +279,7 @@ fn build_menu(frame: &Frame, ui: &Ui, shared: &Shared) -> MenuBar {
     let ui_for_menu = *ui;
     let shared_for_menu = shared.clone();
 
-    pick.clone().on_menu_selected(move |e: MenuEventData| {
+    menu_bar.on_menu_selected(move |e: MenuEventData| {
         match e.get_menu_id() {
             Some(id) if id == ID_PICK_DIR => {
                 ask_conf_dir(&frame_for_menu, &ui_for_menu, &shared_for_menu);
@@ -305,7 +300,7 @@ fn build_menu(frame: &Frame, ui: &Ui, shared: &Shared) -> MenuBar {
         }
     });
 
-    pick
+    menu_bar
 }
 
 fn build_body(frame: &Frame, shared: &Shared) -> Ui {
@@ -676,12 +671,17 @@ fn wire(
             };
             let outcome = {
                 let mut st = shared.borrow_mut();
-                // Split the borrow: `apply` needs the catalog read-only and
-                // the store mutably, and both live in the same struct — one
-                // field at a time keeps the borrow checker happy.
-                let catalog = &st.catalog;
-                let r = catalog.apply(&mut st.store, &name);
-                let _ = st.store.save(&st.config_path);
+                // Split the borrow by destructuring the guard once, into two
+                // disjoint fields: `apply` takes the catalog by reference and
+                // the store by `&mut`, and borrowing `st` twice is what the
+                // compiler rejects.
+                let GuiState {
+                    store,
+                    catalog,
+                    config_path,
+                } = &mut *st;
+                let r = catalog.apply(store, &name);
+                let _ = store.save(config_path);
                 r
             };
             refresh(&ui, &shared);
@@ -795,19 +795,17 @@ fn ask_conf_dir(frame: &Frame, ui: &Ui, shared: &Shared) -> bool {
 /// way to change twenty files, and there is exactly one on purpose.
 fn ask_base_conf(frame: &Frame, ui: &Ui, shared: &Shared) -> bool {
     let current = shared.borrow().store.base_conf.clone().unwrap_or_default();
-    let dlg = FileDialog::builder(
-        frame,
-        "Pick a base WireGuard config. Its AllowedIPs become hosts in your list.",
-        &current,
-    )
-    .build();
+    let dlg = FileDialog::builder(frame)
+        .with_message("Pick a base WireGuard config. Its AllowedIPs become hosts in your list.")
+        .with_default_dir(&current)
+        .build();
     if dlg.show_modal() != ID_OK {
         return false;
     }
     let Some(path) = dlg.get_path() else {
         return false;
     };
-    let imported = match import::from_config(&path, &PtrResolver) {
+    let imported = match import::from_config(std::path::Path::new(&path), &PtrResolver) {
         Ok(i) => i,
         Err(e) => {
             ui.set_status(&format!("Could not read {path}: {e}"));
