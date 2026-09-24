@@ -535,6 +535,7 @@ fn build_body(frame: &Frame, shared: &Shared, status_bar: Option<StatusBar>) -> 
 
     let ui = Ui {
         frame: *frame,
+        status_bar,
         table,
         search,
         template_list,
