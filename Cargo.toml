@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 description = "IPs editor for multiple AmnesiaWG configs"
 
+[build-dependencies]
+# Compiles wireutils.manifest into a Win32 resource and links it in. Windows
+# only — the build script is a no-op elsewhere, and this dependency is not
+# pulled at all unless the target is Windows.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [features]
 default = []
 # The wx GUI. Without it the crate builds as a plain library + logic tests,
