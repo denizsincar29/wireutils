@@ -8,6 +8,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The rule this file enforces: an address reaches `ips` only through
+/// `resolve` (a real DNS answer) or through `add_address` (a config that
+/// listed it). A *label* — the CIDR an import uses to name a group — is
+/// never a route, however much it looks like one.
+
 /// Where the list came from, for the owner's benefit — a host he typed is
 /// not the same as one poured in from a template.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -118,6 +123,12 @@ pub struct HostStore {
     /// The folder of `.conf` files, chosen on first run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conf_dir: Option<String>,
+    /// A config the owner already trusts, used as the source for the import
+    /// button. Remembered so the second import does not ask again — the file
+    /// changes rarely and hunting for it twice is the kind of friction that
+    /// stops a feature being used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_conf: Option<String>,
     /// Known groups, kept even when empty so a group created by a template
     /// does not vanish when its last host is deleted.
     #[serde(default)]
@@ -177,6 +188,7 @@ impl Default for HostStore {
         HostStore {
             version: schema_version(),
             conf_dir: None,
+            base_conf: None,
             groups: Vec::new(),
             hosts: Vec::new(),
             templates_updated: None,
@@ -208,8 +220,18 @@ impl HostStore {
     /// Add a host by domain or IP. A target already in the list is updated
     /// (gaining the new group) rather than duplicated — the same subnet twice
     /// in `AllowedIPs` is noise the owner would have to clean by hand.
+    ///
+    /// A host with a *name* is created with no addresses: the name is the
+    /// thing the owner typed, and its addresses come from resolution. Only a
+    /// target that is itself an address carries one. Writing a name into
+    /// `ips` would put a bare domain into `AllowedIPs`, which the tunnel
+    /// cannot route.
+    ///
+    /// Use [`HostStore::add_address`] when the addresses are already known
+    /// and must not be thrown away — the import path does exactly that.
     pub fn add_host(&mut self, target: &str, groups: &[String]) -> &mut Host {
         let target = target.trim().to_string();
+        let address = is_address(&target);
         for g in groups {
             self.ensure_group(g);
         }
@@ -219,17 +241,93 @@ impl HostStore {
                     self.hosts[i].groups.push(g.clone());
                 }
             }
-            if let Some(new) = Host::new(&target).ips.first().cloned() {
-                if !self.hosts[i].ips.contains(&new) {
-                    self.hosts[i].ips.push(new);
+            // A CIDR typed by the owner is itself the address wanted; a
+            // domain can only be resolved. The seed goes when the addresses
+            // do, so a label never outlives the reason it was there.
+            if address {
+                if !self.hosts[i].error.take().is_some() {
+                    self.hosts[i].ips.retain(|ip| ip != &target);
                 }
             }
             return &mut self.hosts[i];
         }
-        let mut host = Host::new(&target);
+        let mut host = Host::new("");
+        host.target = target;
+        // Note the deliberate omission: the target is *not* seeded into
+        // `ips` even when it is a CIDR. Seeding it here is how a subnet that
+        // exists only as a label — the `31.13.64.0/24` an import gives a
+        // group — turns into a route covering 256 addresses the owner's
+        // config never listed. An address reaches `ips` through `resolve`
+        // (for a domain) or `add_address` (for a file's own list), and both
+        // of those mean it.
         host.groups = groups.to_vec();
         self.hosts.push(host);
         self.hosts.last_mut().unwrap()
+    }
+
+    /// Add a host together with the addresses that belong to it.
+    ///
+    /// This is the door for data that arrives from somewhere else — an
+    /// imported config, a template — where the addresses are the substance
+    /// and the name is only a label for them. The name is *never* copied into
+    /// `ips`: an import that turned its `31.13.64.0/24` label into a route
+    /// would hand the tunnel 256 addresses the owner's config never listed.
+    ///
+    /// An existing host of the same name absorbs the addresses rather than
+    /// being duplicated, and keeps the groups it already had.
+    pub fn add_address(
+        &mut self,
+        target: &str,
+        ips: &[String],
+        groups: &[String],
+    ) -> &mut Host {
+        for g in groups {
+            self.ensure_group(g);
+        }
+        let existing = self.hosts.iter().position(|h| h.target == target);
+        let i = match existing {
+            Some(i) => i,
+            None => {
+                let mut host = Host::new(target);
+                // `Host::new` seeds a CIDR target into `ips` — right for a
+                // network the owner typed, wrong for a label that names a
+                // group. The distinction belongs to the caller, and this
+                // method's contract is that addresses arrive in `ips`; so the
+                // seed goes and the file's own list is what the host keeps.
+                let _ = host.ips.pop();
+                host.source = Source::Template;
+                host.groups = groups.to_vec();
+                self.hosts.push(host);
+                self.hosts.len() - 1
+            }
+        };
+        // The same argument applies to a host that was already in the list.
+        // A store written before the rule above existed may still carry the
+        // label as an address — and that is the store that gets opened next,
+        // so the correction has to happen here rather than at import time.
+        // The label is a name for the group; a route comes only from the
+        // addresses a config actually listed.
+        //
+        // The label goes even when the caller brings nothing to replace it.
+        // The earlier version kept it in that case, on the reasoning that a
+        // typed network must survive — and the legacy shape is precisely a
+        // store whose *only* entry under that target is the label, so the
+        // test written for the rule passed while the rule did nothing. A
+        // target that is an address loses its seed here, always; a network
+        // the owner wants routed comes back through `resolve`.
+        self.hosts[i].ips.retain(|ip| ip != target);
+        for g in groups {
+            if !self.hosts[i].groups.contains(g) {
+                self.hosts[i].groups.push(g.clone());
+            }
+        }
+        for ip in ips {
+            if !self.hosts[i].ips.contains(ip) {
+                self.hosts[i].ips.push(ip.clone());
+            }
+        }
+        self.hosts[i].error = None;
+        &mut self.hosts[i]
     }
 
     /// Remove a host by its target.
@@ -322,7 +420,7 @@ impl HostStore {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
     #[test]
@@ -382,6 +480,11 @@ mod tests {
         s.add_host("1.2.3.4", &[]);
         s.add_host("5.6.7.8", &[]);
         s.add_host("1.2.3.4", &["g".into()]);
+        // A typed address is not in `ips` until it is resolved, so the
+        // resolve step is what the value reads from.
+        for i in 0..s.hosts.len() {
+            s.hosts[i].ips = vec![s.hosts[i].target.clone()];
+        }
         assert_eq!(s.allowed_ips_value(), "1.2.3.4/32, 5.6.7.8/32");
     }
 

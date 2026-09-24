@@ -70,6 +70,13 @@ pub fn conf_files(dir: &Path) -> Result<Vec<PathBuf>> {
 /// Refusing here is the point. Writing a partial list because a domain did
 /// not resolve would put traffic outside the tunnel with no visible sign
 /// that anything is wrong; better to stop and say which host is unresolved.
+///
+/// The last check is the one that matters most and is easy to miss: a host
+/// whose *name* is a domain but whose only address is its own name would
+/// write `instagram.com` into `AllowedIPs`. WireGuard takes that line, the
+/// tunnel comes up, and the route silently covers nothing — the failure mode
+/// this whole program exists to prevent. A name must never be written as an
+/// address, however plausible it looks.
 pub fn value_or_error(store: &HostStore) -> Result<String> {
     let missing: Vec<&str> = store.unresolved().iter().map(|h| h.target.as_str()).collect();
     if !missing.is_empty() {
@@ -82,6 +89,30 @@ pub fn value_or_error(store: &HostStore) -> Result<String> {
         return Err(Error::Invalid(
             "the host list is empty — applying it would remove every route".to_string(),
         ));
+    }
+    // Every entry that would go into the line must be an address, whether it
+    // sits in `ips` or is the target itself. Checking only the hosts whose
+    // target is not an address is not enough: a store written before the
+    // label rule existed carries its label as an address, so the target is a
+    // perfectly good CIDR while the *entry* is a name the tunnel cannot use.
+    let named: Vec<String> = store
+        .hosts
+        .iter()
+        .flat_map(|h| h.allowed_entries())
+        .filter(|entry| !entry.trim_end_matches(|c| c == '0' || c == '/' || c == ':').is_empty())
+        .filter(|entry| {
+            let bare = entry.split('/').next().unwrap_or(entry);
+            !crate::hosts::is_address(entry) && !crate::hosts::is_address(bare)
+        })
+        .collect();
+    if !named.is_empty() {
+        let mut named = named;
+        named.sort();
+        named.dedup();
+        return Err(Error::Invalid(format!(
+            "these hosts would be written as names, not addresses: {} — resolve them first",
+            named.join(", ")
+        )));
     }
     Ok(store.allowed_ips_value())
 }
@@ -255,6 +286,8 @@ mod tests {
         let mut store = HostStore::default();
         store.add_host("1.2.3.4", &[]);
         store.add_host("api.openai.com", &[]);
+        // What `resolve` would have left behind for a literal address.
+        store.hosts[0].ips = vec!["1.2.3.4".into()];
         store.hosts[1].ips = vec!["5.6.7.8".into(), "9.9.9.9".into()];
         let report = apply(&store, &dir).unwrap();
         assert_eq!(report.written(), 1);
@@ -281,5 +314,55 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
             .collect();
         assert_eq!(names, vec!["a.conf", "b.conf", "c.conf"]);
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+    use crate::hosts::HostStore;
+
+    /// A store written before the label rule existed keeps its CIDR label as
+    /// an address. The guard has to catch it: the target is a valid network,
+    /// so a check that only looks at non-address targets walks straight past
+    /// the very store this rule was written for.
+    ///
+    /// The old shape is built literally — `add_host` no longer produces it,
+    /// and that is the point of the test: the file on disk still can.
+    #[test]
+    fn a_stale_subnet_label_is_dropped_on_the_next_import() {
+        let mut store = HostStore::default();
+        store.add_host("31.13.64.0/24", &[]);
+        // The old shape: the label seeded itself as its own address.
+        store.hosts[0].ips = vec!["31.13.64.0/24".into()];
+        // The import brings the file's own addresses for that label.
+        store.add_address("31.13.64.0/24", &["31.13.64.1/32".into()], &[]);
+        assert_eq!(store.hosts[0].ips, vec!["31.13.64.1/32"]);
+        assert!(value_or_error(&store).is_ok());
+    }
+
+    /// A typed network loses its label when an import names it, and the name
+    /// is all the import brings. Refusing to write the config until the
+    /// network has been resolved is the honest outcome: silently keeping
+    /// `31.13.64.0/24` because "the owner typed it" is what made the legacy
+    /// store unreadable in the first place.
+    #[test]
+    fn a_label_displaced_by_an_import_leaves_the_host_unresolved() {
+        let mut store = HostStore::default();
+        store.add_host("31.13.64.0/24", &[]);
+        // Whatever resolve filled in for the owner's own network.
+        store.hosts[0].ips = vec!["31.13.64.0/24".into()];
+        store.add_address("31.13.64.0/24", &[], &["chatgpt".to_string()]);
+        assert!(store.hosts[0].ips.is_empty(), "the label is not a route");
+        assert_eq!(store.hosts[0].groups, vec!["chatgpt"]);
+    }
+
+    /// A domain with no addresses at all is caught by the first check.
+    #[test]
+    fn a_domain_with_no_addresses_is_refused() {
+        let mut store = HostStore::default();
+        store.add_host("instagram.com", &[]);
+        let err = value_or_error(&store).unwrap_err().to_string();
+        assert!(err.contains("instagram.com"), "{err}");
     }
 }

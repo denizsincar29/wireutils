@@ -11,6 +11,7 @@ use std::process::ExitCode;
 
 use wireutils::apply::{self, FileResult};
 use wireutils::hosts::HostStore;
+use wireutils::import::{self, Imported, PtrResolver};
 use wireutils::paths;
 use wireutils::resolve::{self, Outcome, SystemResolver};
 use wireutils::templates;
@@ -35,6 +36,7 @@ Commands:
   apply [--dry-run]        write the list into every .conf in the folder
   templates [QUERY]        list the catalog, or search it
   templates-update [URL]   fetch a newer catalog from the internet
+  import <file.conf>       read a base config's AllowedIPs into the host list
   gui                      open the window (only when built with --features gui)
 
 Options:
@@ -177,7 +179,7 @@ fn run(args: &[String]) -> Result<(), String> {
                     } else {
                         format!("  {}", h.ips.join(" "))
                     };
-                    println!("  {}{}{}", h.target, group, addr);
+                    println!("  {}{}{}", h.label(), group, addr);
                 }
             }
             if !store.groups.is_empty() {
@@ -288,6 +290,41 @@ fn run(args: &[String]) -> Result<(), String> {
             );
             if !report.errors.is_empty() {
                 return Err(format!("{} file(s) failed", report.errors.len()));
+            }
+        }
+
+        "import" => {
+            let file = rest.first().ok_or("import needs the path to a .conf file")?;
+            let path_in = PathBuf::from(file);
+            let names = PtrResolver;
+            let imported = import::from_config(&path_in, &names)?;
+            let mut store = store;
+            match imported {
+                Imported::FullTunnel => {
+                    println!("{}: full tunnel (0.0.0.0/0) — nothing to import", path_in.display());
+                    println!("a config that takes every address has no site list to take");
+                }
+                Imported::Nothing => {
+                    println!("{}: no AllowedIPs to import", path_in.display());
+                }
+                Imported::Hosts(hosts) => {
+                    let host_count = hosts.len();
+                    let addr_count: usize = hosts.iter().map(|h| h.ips.len()).sum();
+                    let name = groups.first().map(String::as_str);
+                    let added = import::apply_import(&mut store, hosts, name);
+                    store.base_conf = Some(path_in.to_string_lossy().to_string());
+                    save(&store, &path)?;
+                    println!(
+                        "{}: {host_count} host(s) from {addr_count} address(es)",
+                        path_in.display()
+                    );
+                    println!("{added} new, {} already known", host_count - added);
+                    if let Some(g) = name {
+                        println!("group: {g}");
+                    }
+                    println!("base config remembered as {}", path_in.display());
+                    println!("note: addresses resolve normally — run `resolve` before `apply`");
+                }
             }
         }
 

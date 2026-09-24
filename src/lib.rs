@@ -14,16 +14,19 @@
 //! * [`resolve`] — domains to addresses, cached, with failures surfaced.
 //! * [`templates`] — the catalog of known sites, updatable from the internet.
 //! * [`apply`] — the folder-wide write, with backups.
+//! * [`import`] — building a starting list out of an existing base config.
 //! * [`paths`] — where `hosts.json` lives on Windows and Linux.
 
 pub mod apply;
 pub mod hosts;
+pub mod import;
 pub mod paths;
 pub mod resolve;
 pub mod templates;
 pub mod wgconf;
 
 pub use hosts::{Error, Host, HostStore, Result, Source};
+pub use import::{Imported, NameResolver, PtrResolver};
 pub use resolve::{resolve_all, Outcome, Resolver, SystemResolver};
 pub use templates::Catalog;
 
