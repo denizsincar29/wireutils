@@ -1,0 +1,62 @@
+name: gui-check
+
+# The `gui` feature pulls wxdragon, which cannot be compiled in the agent's
+# container (no wx, no display, no C toolchain). This workflow is the only
+# place the GUI code is actually type-checked: it runs a full `cargo check`
+# with the feature on and prints every diagnostic, so the author can paste the
+# output back instead of copying long rustc messages with a screen reader.
+#
+# It is a check, not a gate: nothing blocks a merge and no artifact is
+# published. The `-Z`/nightly flags are deliberately absent.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["core", "main"]
+  pull_request:
+
+jobs:
+  check-gui:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: cargo check --features gui
+        id: check
+        shell: bash
+        run: |
+          set +e
+          cargo check --features gui --message-format=short 2>&1 | tee check.log
+          echo "exit=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### cargo check --features gui'
+            echo
+            echo '```'
+            tail -n 200 check.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload full log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-check-log
+          path: check.log
+          if-no-files-found: warn

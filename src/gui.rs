@@ -28,7 +28,7 @@
 //!   reference across calls, and every handler that changes the store saves it
 //!   before returning. `hosts.json` is the owner's only copy of the list.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -36,6 +36,7 @@ use wxdragon::prelude::*;
 
 use crate::apply;
 use crate::hosts::{HostStore, Source};
+use crate::import::{self, Imported, PtrResolver};
 use crate::paths;
 use crate::resolve::{self, SystemResolver};
 use crate::templates::{self, Catalog};
@@ -55,17 +56,25 @@ type Shared = Rc<RefCell<GuiState>>;
 const ID_PICK_DIR: i32 = ID_HIGHEST + 1;
 const ID_APPLY: i32 = ID_HIGHEST + 2;
 const ID_UPDATE_TPL: i32 = ID_HIGHEST + 3;
+const ID_IMPORT: i32 = ID_HIGHEST + 4;
 
 /// Run the application. Returns the process exit code.
+///
+/// The exit code is carried out of the closure in a `Cell` rather than a
+/// plain local: `wxdragon::main` demands a `FnOnce + 'static`, and a closure
+/// that borrows a local from this frame can never satisfy `'static` — adding
+/// `move` only trades one borrow error for another. A shared cell is owned by
+/// the closure and still readable here afterwards.
 pub fn run() -> i32 {
-    let mut exit_code = 0;
+    let exit_code = Rc::new(Cell::new(0));
+    let inner = Rc::clone(&exit_code);
 
-    let result = wxdragon::main(|app| {
-        exit_code = start(&app);
+    let result = wxdragon::main(move |app| {
+        inner.set(start(&app));
     });
 
     match result {
-        Ok(()) => exit_code,
+        Ok(()) => exit_code.get(),
         Err(e) => {
             eprintln!("wireutils: could not start the window: {e}");
             1
@@ -263,6 +272,8 @@ fn build_menu(frame: &Frame, ui: &Ui, shared: &Shared) -> MenuBar {
                 .append_item(ID_APPLY, "Write to all configs", "Rewrite AllowedIPs in every .conf")
                 .append_item(ID_UPDATE_TPL, "Update templates from the internet", "Fetch the newest list of known sites")
                 .append_separator()
+                .append_item(ID_IMPORT, "Import addresses from a base config…", "Read a .conf's AllowedIPs into the host list")
+                .append_separator()
                 .append_item(ID_EXIT, "Exit", "Close wireutils")
                 .build(),
             "File",
@@ -283,6 +294,9 @@ fn build_menu(frame: &Frame, ui: &Ui, shared: &Shared) -> MenuBar {
             }
             Some(id) if id == ID_UPDATE_TPL => {
                 update_templates(&ui_for_menu, &shared_for_menu);
+            }
+            Some(id) if id == ID_IMPORT => {
+                ask_base_conf(&frame_for_menu, &ui_for_menu, &shared_for_menu);
             }
             Some(id) if id == ID_EXIT => {
                 frame_for_menu.close(true);
@@ -345,7 +359,7 @@ fn build_body(frame: &Frame, shared: &Shared) -> Ui {
     let tpl_box =
         StaticBoxSizerBuilder::new_with_label(Orientation::Horizontal, &panel, "Templates").build();
     let search = SearchCtrl::builder(&panel)
-        .with_value(String::new())
+        .with_value("")
         .with_size(Size::new(300, -1))
         .build();
     search.show_search_button(false);
@@ -381,10 +395,12 @@ fn build_body(frame: &Frame, shared: &Shared) -> Ui {
     let force_btn = Button::builder(&panel).with_label("Resolve again (all)").build();
     let apply_btn = Button::builder(&panel).with_label("Write to all configs").build();
     let dir_btn = Button::builder(&panel).with_label("Config folder…").build();
+    let import_btn = Button::builder(&panel).with_label("Import base config…").build();
     bottom.add(&resolve_btn, 0, SizerFlag::All, 4);
     bottom.add(&force_btn, 0, SizerFlag::All, 4);
     bottom.add(&apply_btn, 0, SizerFlag::All, 4);
     bottom.add(&dir_btn, 0, SizerFlag::All, 4);
+    bottom.add(&import_btn, 0, SizerFlag::All, 4);
     root.add_sizer(&bottom, 0, SizerFlag::Expand | SizerFlag::All, 8);
 
     let status = StaticText::builder(&panel).build();
@@ -408,7 +424,7 @@ fn build_body(frame: &Frame, shared: &Shared) -> Ui {
     };
 
     wire(&ui, shared, add_btn, rename_btn, remove_btn, group_add, group_apply_btn, group_rm,
-         tpl_add, tpl_update, resolve_btn, force_btn, apply_btn, dir_btn);
+         tpl_add, tpl_update, resolve_btn, force_btn, apply_btn, dir_btn, import_btn);
     ui
 }
 
@@ -436,6 +452,7 @@ fn wire(
     force_btn: Button,
     apply_btn: Button,
     dir_btn: Button,
+    import_btn: Button,
 ) {
     // --- adding a host ----------------------------------------------------
     {
@@ -659,7 +676,11 @@ fn wire(
             };
             let outcome = {
                 let mut st = shared.borrow_mut();
-                let r = st.catalog.apply(&mut st.store, &name);
+                // Split the borrow: `apply` needs the catalog read-only and
+                // the store mutably, and both live in the same struct — one
+                // field at a time keeps the borrow checker happy.
+                let catalog = &st.catalog;
+                let r = catalog.apply(&mut st.store, &name);
                 let _ = st.store.save(&st.config_path);
                 r
             };
@@ -716,6 +737,15 @@ fn wire(
             ask_conf_dir(&ui.frame, &ui, &shared);
         });
     }
+
+    // --- importing a base config ------------------------------------------
+    {
+        let ui = *ui;
+        let shared = shared.clone();
+        import_btn.on_click(move |_| {
+            ask_base_conf(&ui.frame, &ui, &shared);
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -749,6 +779,84 @@ fn ask_conf_dir(frame: &Frame, ui: &Ui, shared: &Shared) -> bool {
         Err(e) => ui.set_status(&format!("Folder set to {path}, but saving hosts.json failed: {e}")),
     }
     true
+}
+
+/// Ask which `.conf` to use as a base, then pull its `AllowedIPs` into the
+/// host list.
+///
+/// The path is remembered in `hosts.json`, so the second run offers it as the
+/// default rather than making the owner find the file again — the base config
+/// changes rarely and hunting for it twice is the friction that stops a
+/// feature being used.
+///
+/// Nothing is written to the `.conf` files here. The import only proposes
+/// hosts; the addresses land in the list, and "Write to all configs" is still
+/// the single door to disk. An import that wrote on its own would be a second
+/// way to change twenty files, and there is exactly one on purpose.
+fn ask_base_conf(frame: &Frame, ui: &Ui, shared: &Shared) -> bool {
+    let current = shared.borrow().store.base_conf.clone().unwrap_or_default();
+    let dlg = FileDialog::builder(
+        frame,
+        "Pick a base WireGuard config. Its AllowedIPs become hosts in your list.",
+        &current,
+    )
+    .build();
+    if dlg.show_modal() != ID_OK {
+        return false;
+    }
+    let Some(path) = dlg.get_path() else {
+        return false;
+    };
+    let imported = match import::from_config(&path, &PtrResolver) {
+        Ok(i) => i,
+        Err(e) => {
+            ui.set_status(&format!("Could not read {path}: {e}"));
+            return false;
+        }
+    };
+    match imported {
+        Imported::FullTunnel => {
+            ui.set_status(
+                "That config tunnels everything (0.0.0.0/0) — there is no site list to take.",
+            );
+            false
+        }
+        Imported::Nothing => {
+            ui.set_status("That config has no AllowedIPs line to import.");
+            false
+        }
+        Imported::Hosts(hosts) => {
+            let addrs: usize = hosts.iter().map(|h| h.ips.len()).sum();
+            let labels: Vec<String> = hosts.iter().take(8).map(|h| h.label().to_string()).collect();
+            let mut preview = labels.join(", ");
+            if hosts.len() > labels.len() {
+                preview.push_str(&format!(", and {} more", hosts.len() - labels.len()));
+            }
+            let question = format!(
+                "Import {} host(s) from {addrs} address(es)?\n\n{preview}\n\n\
+                 Names come from a reverse lookup where one exists, the network \
+                 otherwise. Nothing is written to your .conf files until you press \
+                 \"Write to all configs\".",
+                hosts.len()
+            );
+            if !confirm(ui, &question) {
+                ui.set_status("Import cancelled — the host list is unchanged.");
+                return false;
+            }
+            let added = {
+                let mut st = shared.borrow_mut();
+                let n = import::apply_import(&mut st.store, hosts, None);
+                st.store.base_conf = Some(path.clone());
+                let _ = st.store.save(&st.config_path);
+                n
+            };
+            refresh(ui, shared);
+            ui.set_status(&format!(
+                "Imported from {path}: {added} new host(s). Resolve, then write to all configs."
+            ));
+            true
+        }
+    }
 }
 
 /// The row the owner has selected, as an index into `store.hosts`.
