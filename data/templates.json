@@ -1,0 +1,195 @@
+{
+  "version": 1,
+  "templates": [
+    {
+      "name": "chatgpt",
+      "keywords": ["openai", "gpt", "ai"],
+      "domains": [
+        "chatgpt.com",
+        "chat.openai.com",
+        "api.openai.com",
+        "auth.openai.com",
+        "platform.openai.com",
+        "cdn.oaistatic.com",
+        "openai.com"
+      ]
+    },
+    {
+      "name": "claude",
+      "keywords": ["anthropic", "ai"],
+      "domains": [
+        "claude.ai",
+        "api.anthropic.com",
+        "anthropic.com",
+        "console.anthropic.com"
+      ]
+    },
+    {
+      "name": "gemini",
+      "keywords": ["google", "ai", "bard", "aistudio"],
+      "domains": [
+        "gemini.google.com",
+        "aistudio.google.com",
+        "makersuite.google.com",
+        "generativelanguage.googleapis.com"
+      ]
+    },
+    {
+      "name": "instagram",
+      "keywords": ["meta", "insta", "ig"],
+      "domains": [
+        "instagram.com",
+        "www.instagram.com",
+        "i.instagram.com",
+        "graph.instagram.com",
+        "cdninstagram.com",
+        "scontent.cdninstagram.com"
+      ]
+    },
+    {
+      "name": "facebook",
+      "keywords": ["meta", "fb"],
+      "domains": [
+        "facebook.com",
+        "www.facebook.com",
+        "m.facebook.com",
+        "graph.facebook.com",
+        "fbcdn.net",
+        "connect.facebook.net"
+      ]
+    },
+    {
+      "name": "whatsapp",
+      "keywords": ["meta", "wa"],
+      "domains": [
+        "whatsapp.com",
+        "web.whatsapp.com",
+        "web.whatsapp.net",
+        "mmg.whatsapp.net",
+        "media.whatsapp.net"
+      ]
+    },
+    {
+      "name": "twitter",
+      "keywords": ["x", "tweet"],
+      "domains": [
+        "twitter.com",
+        "x.com",
+        "api.twitter.com",
+        "api.x.com",
+        "t.co",
+        "twimg.com",
+        "abs.twimg.com",
+        "pbs.twimg.com",
+        "video.twimg.com"
+      ]
+    },
+    {
+      "name": "youtube",
+      "keywords": ["google", "video", "yt"],
+      "domains": [
+        "youtube.com",
+        "www.youtube.com",
+        "m.youtube.com",
+        "youtu.be",
+        "googlevideo.com",
+        "ytimg.com",
+        "i.ytimg.com",
+        "yt3.ggpht.com"
+      ]
+    },
+    {
+      "name": "telegram",
+      "keywords": ["tg", "messenger"],
+      "domains": [
+        "telegram.org",
+        "t.me",
+        "telegram.me",
+        "core.telegram.org",
+        "api.telegram.org"
+      ]
+    },
+    {
+      "name": "github",
+      "keywords": ["git", "code"],
+      "domains": [
+        "github.com",
+        "api.github.com",
+        "raw.githubusercontent.com",
+        "codeload.github.com",
+        "objects.githubusercontent.com",
+        "githubusercontent.com",
+        "githubassets.com"
+      ]
+    },
+    {
+      "name": "openrouter",
+      "keywords": ["llm", "ai", "router"],
+      "domains": ["openrouter.ai", "api.openrouter.ai"]
+    },
+    {
+      "name": "huggingface",
+      "keywords": ["hf", "models", "ai", "ml"],
+      "domains": [
+        "huggingface.co",
+        "cdn-lfs.huggingface.co",
+        "huggingface.co/api"
+      ]
+    },
+    {
+      "name": "reddit",
+      "keywords": ["forum"],
+      "domains": [
+        "reddit.com",
+        "www.reddit.com",
+        "old.reddit.com",
+        "redd.it",
+        "redditmedia.com",
+        "redditstatic.com"
+      ]
+    },
+    {
+      "name": "wikipedia",
+      "keywords": ["wiki"],
+      "domains": [
+        "wikipedia.org",
+        "en.wikipedia.org",
+        "ru.wikipedia.org",
+        "wikimedia.org",
+        "upload.wikimedia.org"
+      ]
+    },
+    {
+      "name": "discord",
+      "keywords": ["chat", "voice"],
+      "domains": [
+        "discord.com",
+        "discordapp.com",
+        "discord.gg",
+        "cdn.discordapp.com",
+        "gateway.discord.gg"
+      ]
+    },
+    {
+      "name": "medium",
+      "keywords": ["blog", "read"],
+      "domains": ["medium.com", "miro.medium.com", "cdn-images-1.medium.com"]
+    },
+    {
+      "name": "spotify",
+      "keywords": ["music", "audio"],
+      "domains": [
+        "spotify.com",
+        "open.spotify.com",
+        "api.spotify.com",
+        "audio-ak-spotify-com.akamaized.net"
+      ]
+    },
+    {
+      "name": "cloudflare-dns",
+      "keywords": ["dns", "1.1.1.1", "resolver"],
+      "domains": ["cloudflare-dns.com", "one.one.one.one"],
+      "ips": ["1.1.1.1", "1.0.0.1"]
+    }
+  ]
+}

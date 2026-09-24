@@ -1,0 +1,27 @@
+[package]
+name = "wireutils"
+version = "0.1.0"
+edition = "2021"
+description = "IPs editor for multiple AmnesiaWG configs"
+
+[features]
+default = []
+# The wx GUI. Without it the crate builds as a plain library + logic tests,
+# which is all that can be verified in a container with no wx and no display.
+gui = ["dep:wxdragon"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Catalog updates only. Kept feature-light (no TLS backend of its own) so a
+# container build has nothing to compile but Rust.
+ureq = { version = "2", default-features = false, features = ["json"] }
+wxdragon = { version = "0.9", optional = true }
+
+[lib]
+name = "wireutils"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wireutils-cli"
+path = "src/main.rs"
