@@ -6,6 +6,14 @@ name: gui-check
 # with the feature on and prints every diagnostic, so the author can paste the
 # output back instead of copying long rustc messages with a screen reader.
 #
+# It also *runs* the assertions in `src/guiassert.rs`. Those stand in for the
+# asserts inside wxWidgets, which are invisible from Rust on the owner's
+# machine: `wxASSERT` aborts a debug build and does nothing at all on a release
+# one, so a wrong status-bar field index compiles clean and surfaces as a
+# vanishing window instead of a message. The guards are ordinary `#[cfg(test)]`
+# code, but they only compile behind `--features gui`, so this is the one job
+# where they can be executed at all.
+#
 # It is a check, not a gate: nothing blocks a merge and no artifact is
 # published. The `-Z`/nightly flags are deliberately absent.
 
@@ -43,6 +51,16 @@ jobs:
           set -o pipefail
           cargo check --features gui --message-format=short 2>&1 | tee check.log
 
+      - name: cargo test --features gui
+        # --no-fail-fast: a second failing guard is information, not noise.
+        # The job is allowed to fail here without hiding the check above: both
+        # steps run, both land in the summary, and the log artifact holds both.
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --features gui --lib --no-fail-fast 2>&1 | tee test.log
+
       - name: Summary
         if: always()
         shell: bash
@@ -53,6 +71,14 @@ jobs:
             echo '```'
             tail -n 200 check.log
             echo '```'
+            if [ -f test.log ]; then
+              echo
+              echo '### cargo test --features gui'
+              echo
+              echo '```'
+              tail -n 200 test.log
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload full log
@@ -60,5 +86,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gui-check-log
-          path: check.log
+          path: |
+            check.log
+            test.log
           if-no-files-found: warn

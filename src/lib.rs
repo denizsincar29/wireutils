@@ -32,3 +32,5 @@ pub use templates::Catalog;
 
 #[cfg(feature = "gui")]
 pub mod gui;
+#[cfg(feature = "gui")]
+pub mod guiassert;

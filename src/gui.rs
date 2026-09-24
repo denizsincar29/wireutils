@@ -146,19 +146,16 @@ fn start(_app: &App) -> i32 {
     // line of the window was the only channel on Windows, and that is exactly
     // the channel a screen reader reads after a button press.
     //
-    // Created with one field: the text is the whole message here, and a window
-    // that splits it into panes reads worse aloud than a single full-width
-    // line. Built through the builder rather than `Frame::create_status_bar`:
-    // the raw call has neither `StatusBarStyle` nor `ID_NONE` in the prelude
-    // (wxdragon exports both only from its own modules) and it returns the bar
-    // without attaching it to the frame — `set_status_text` on the frame would
-    // still aim at a window that has none. The builder does both.
-    StatusBar::builder(&frame)
-        .with_fields_count(1)
-        .add_initial_text(0, "statusbar")
-        .build();
+    // The bar itself lives in `guiassert::status_bar`, together with the
+    // field count the guards there check. What matters here: it is created
+    // before anything can write to it (a frame with no bar is the assert that
+    // started this), and it has exactly the panes `guiassert` says it has.
+    let status = crate::guiassert::status_bar(&frame);
+    if let Some(bar) = &status {
+        bar.set_status_text("Ready.", crate::guiassert::STATUS_PRIMARY_FIELD);
+    }
 
-    let ui = build_body(&frame, &shared);
+    let ui = build_body(&frame, &shared, status);
     frame.centre();
     frame.show(true);
 
@@ -258,6 +255,11 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[derive(Clone, Copy)]
 struct Ui {
     frame: Frame,
+    /// The frame's own status bar, kept so `set_status` writes to the bar
+    /// rather than only to the in-window line. `None` if wx refused to create
+    /// one — then the line is the only channel left, which is exactly the
+    /// state that used to abort the app.
+    status_bar: Option<StatusBar>,
     table: DataViewListCtrl,
     search: SearchCtrl,
     template_list: DataViewListCtrl,
@@ -272,7 +274,16 @@ impl Ui {
     /// what stays on screen afterwards.
     fn set_status(&self, text: &str) {
         self.status.set_label(text);
-        self.frame.set_status_text(text, 0);
+        // Through the `StatusBar` handle, and with the field taken from
+        // `guiassert` rather than written as a literal: field 1 of a one-pane
+        // bar is `statbar.cpp:247`, and that bug reached the owner's machine
+        // once already.
+        if let Some(bar) = &self.status_bar {
+            bar.set_status_text(text, crate::guiassert::STATUS_PRIMARY_FIELD);
+            return;
+        }
+        self.frame
+            .set_status_text(text, crate::guiassert::STATUS_PRIMARY_FIELD as i32);
     }
 }
 
@@ -290,11 +301,27 @@ fn build_menu(frame: &Frame, ui: &Ui, shared: &Shared) -> MenuBar {
     let menu_bar = MenuBar::builder()
         .append(
             Menu::builder()
-                .append_item(ID_PICK_DIR, "Config folder…", "Choose the folder of .conf files")
-                .append_item(ID_APPLY, "Write to all configs", "Rewrite AllowedIPs in every .conf")
-                .append_item(ID_UPDATE_TPL, "Update templates from the internet", "Fetch the newest list of known sites")
+                .append_item(
+                    ID_PICK_DIR,
+                    "Config folder…",
+                    "Choose the folder of .conf files",
+                )
+                .append_item(
+                    ID_APPLY,
+                    "Write to all configs",
+                    "Rewrite AllowedIPs in every .conf",
+                )
+                .append_item(
+                    ID_UPDATE_TPL,
+                    "Update templates from the internet",
+                    "Fetch the newest list of known sites",
+                )
                 .append_separator()
-                .append_item(ID_IMPORT, "Import addresses from a base config…", "Read a .conf's AllowedIPs into the host list")
+                .append_item(
+                    ID_IMPORT,
+                    "Import addresses from a base config…",
+                    "Read a .conf's AllowedIPs into the host list",
+                )
                 .append_separator()
                 .append_item(ID_EXIT, "Exit", "Close wireutils")
                 .build(),
@@ -347,20 +374,43 @@ fn build_menu(frame: &Frame, ui: &Ui, shared: &Shared) -> MenuBar {
     menu_bar
 }
 
-fn build_body(frame: &Frame, shared: &Shared) -> Ui {
+fn build_body(frame: &Frame, shared: &Shared, status_bar: Option<StatusBar>) -> Ui {
     let panel = Panel::builder(frame).build();
     let root = BoxSizer::builder(Orientation::Vertical).build();
 
     // --- host table -------------------------------------------------------
     let hosts_box =
-        StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &panel, "Hosts"
-        ).build();
+        StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &panel, "Hosts").build();
 
     let table = DataViewListCtrl::builder(&panel).build();
-    table.append_text_column("Host", 0, DataViewAlign::Left, 260, DataViewColumnFlags::Resizable);
-    table.append_text_column("Groups", 1, DataViewAlign::Left, 160, DataViewColumnFlags::Resizable);
-    table.append_text_column("Addresses", 2, DataViewAlign::Left, 380, DataViewColumnFlags::Resizable);
-    table.append_text_column("State", 3, DataViewAlign::Left, 140, DataViewColumnFlags::Resizable);
+    table.append_text_column(
+        "Host",
+        0,
+        DataViewAlign::Left,
+        260,
+        DataViewColumnFlags::Resizable,
+    );
+    table.append_text_column(
+        "Groups",
+        1,
+        DataViewAlign::Left,
+        160,
+        DataViewColumnFlags::Resizable,
+    );
+    table.append_text_column(
+        "Addresses",
+        2,
+        DataViewAlign::Left,
+        380,
+        DataViewColumnFlags::Resizable,
+    );
+    table.append_text_column(
+        "State",
+        3,
+        DataViewAlign::Left,
+        140,
+        DataViewColumnFlags::Resizable,
+    );
 
     hosts_box.add(&table, 1, SizerFlag::Expand | SizerFlag::All, 6);
 
@@ -381,7 +431,9 @@ fn build_body(frame: &Frame, shared: &Shared) -> Ui {
         StaticBoxSizerBuilder::new_with_label(Orientation::Horizontal, &panel, "Groups").build();
     let group_choice = Choice::builder(&panel).build();
     let group_add = Button::builder(&panel).with_label("New group…").build();
-    let group_apply_btn = Button::builder(&panel).with_label("Add selected hosts to group").build();
+    let group_apply_btn = Button::builder(&panel)
+        .with_label("Add selected hosts to group")
+        .build();
     let group_rm = Button::builder(&panel).with_label("Delete group").build();
     groups_box.add(&group_choice, 1, SizerFlag::All | SizerFlag::Expand, 6);
     groups_box.add(&group_add, 0, SizerFlag::All, 4);
@@ -405,9 +457,27 @@ fn build_body(frame: &Frame, shared: &Shared) -> Ui {
     search.show_cancel_button(true);
 
     let template_list = DataViewListCtrl::builder(&panel).build();
-    template_list.append_text_column("Template", 0, DataViewAlign::Left, 220, DataViewColumnFlags::Resizable);
-    template_list.append_text_column("What it covers", 1, DataViewAlign::Left, 460, DataViewColumnFlags::Resizable);
-    template_list.append_text_column("Known IPs", 2, DataViewAlign::Left, 100, DataViewColumnFlags::Resizable);
+    template_list.append_text_column(
+        "Template",
+        0,
+        DataViewAlign::Left,
+        220,
+        DataViewColumnFlags::Resizable,
+    );
+    template_list.append_text_column(
+        "What it covers",
+        1,
+        DataViewAlign::Left,
+        460,
+        DataViewColumnFlags::Resizable,
+    );
+    template_list.append_text_column(
+        "Known IPs",
+        2,
+        DataViewAlign::Left,
+        100,
+        DataViewColumnFlags::Resizable,
+    );
 
     let tpl_col = BoxSizer::builder(Orientation::Vertical).build();
     tpl_col.add(&search, 0, SizerFlag::All | SizerFlag::Expand, 6);
@@ -415,7 +485,9 @@ fn build_body(frame: &Frame, shared: &Shared) -> Ui {
 
     let tpl_right = BoxSizer::builder(Orientation::Vertical).build();
     let tpl_add = Button::builder(&panel).with_label("Add template").build();
-    let tpl_update = Button::builder(&panel).with_label("Update from internet").build();
+    let tpl_update = Button::builder(&panel)
+        .with_label("Update from internet")
+        .build();
     tpl_right.add(&tpl_add, 0, SizerFlag::All, 4);
     tpl_right.add(&tpl_update, 0, SizerFlag::All, 4);
 
@@ -430,11 +502,19 @@ fn build_body(frame: &Frame, shared: &Shared) -> Ui {
 
     // --- the actions that touch the world ---------------------------------
     let bottom = BoxSizer::builder(Orientation::Horizontal).build();
-    let resolve_btn = Button::builder(&panel).with_label("Resolve domains").build();
-    let force_btn = Button::builder(&panel).with_label("Resolve again (all)").build();
-    let apply_btn = Button::builder(&panel).with_label("Write to all configs").build();
+    let resolve_btn = Button::builder(&panel)
+        .with_label("Resolve domains")
+        .build();
+    let force_btn = Button::builder(&panel)
+        .with_label("Resolve again (all)")
+        .build();
+    let apply_btn = Button::builder(&panel)
+        .with_label("Write to all configs")
+        .build();
     let dir_btn = Button::builder(&panel).with_label("Config folder…").build();
-    let import_btn = Button::builder(&panel).with_label("Import base config…").build();
+    let import_btn = Button::builder(&panel)
+        .with_label("Import base config…")
+        .build();
     bottom.add(&resolve_btn, 0, SizerFlag::All, 4);
     bottom.add(&force_btn, 0, SizerFlag::All, 4);
     bottom.add(&apply_btn, 0, SizerFlag::All, 4);
@@ -462,8 +542,23 @@ fn build_body(frame: &Frame, shared: &Shared) -> Ui {
         status,
     };
 
-    wire(&ui, shared, add_btn, rename_btn, remove_btn, group_add, group_apply_btn, group_rm,
-         tpl_add, tpl_update, resolve_btn, force_btn, apply_btn, dir_btn, import_btn);
+    wire(
+        &ui,
+        shared,
+        add_btn,
+        rename_btn,
+        remove_btn,
+        group_add,
+        group_apply_btn,
+        group_rm,
+        tpl_add,
+        tpl_update,
+        resolve_btn,
+        force_btn,
+        apply_btn,
+        dir_btn,
+        import_btn,
+    );
     ui
 }
 
@@ -525,7 +620,9 @@ fn wire(
                 let _ = st.store.save(&st.config_path);
             }
             refresh(&ui, &shared);
-            ui.set_status(&format!("Added {added} host(s). They have no addresses yet — resolve next."));
+            ui.set_status(&format!(
+                "Added {added} host(s). They have no addresses yet — resolve next."
+            ));
         });
     }
 
@@ -839,7 +936,9 @@ fn ask_conf_dir(frame: &Frame, ui: &Ui, shared: &Shared) -> bool {
     refresh(ui, shared);
     match saved {
         Ok(()) => ui.set_status(&format!("Config folder: {path}")),
-        Err(e) => ui.set_status(&format!("Folder set to {path}, but saving hosts.json failed: {e}")),
+        Err(e) => ui.set_status(&format!(
+            "Folder set to {path}, but saving hosts.json failed: {e}"
+        )),
     }
     true
 }
@@ -890,7 +989,11 @@ fn ask_base_conf(frame: &Frame, ui: &Ui, shared: &Shared) -> bool {
         }
         Imported::Hosts(hosts) => {
             let addrs: usize = hosts.iter().map(|h| h.ips.len()).sum();
-            let labels: Vec<String> = hosts.iter().take(8).map(|h| h.label().to_string()).collect();
+            let labels: Vec<String> = hosts
+                .iter()
+                .take(8)
+                .map(|h| h.label().to_string())
+                .collect();
             let mut preview = labels.join(", ");
             if hosts.len() > labels.len() {
                 preview.push_str(&format!(", and {} more", hosts.len() - labels.len()));
@@ -1164,14 +1267,21 @@ fn refresh(ui: &Ui, shared: &Shared) {
 
     // --- the folder, in the status bar, so it is never a mystery which one
     // is being written to ---
-    match &state.store.conf_dir {
-        Some(d) => ui
-            .frame
-            .set_status_text(&format!("Configs: {d}   |   {}", state.config_path.display()), 1),
-        None => ui
-            .frame
-            .set_status_text(&format!("Configs: (none chosen)   |   {}", state.config_path.display()), 1),
-    }
+    //
+    // Field 0, not 1: the bar has exactly one pane, and wxWidgets asserts
+    // `(unsigned)number < m_panes.size()` in SetStatusText — an index past the
+    // last pane is not clipped, it aborts a debug build and does nothing at
+    // all on a release one. Both paths below were writing to field 1 of a
+    // one-pane bar, so the line that says *where* the configs are was never
+    // the line that appeared.
+    let folder = match &state.store.conf_dir {
+        Some(d) => format!("Configs: {d}"),
+        None => "Configs: (none chosen)".to_string(),
+    };
+    ui.frame.set_status_text(
+        &format!("{folder}   |   {}", state.config_path.display()),
+        crate::guiassert::STATUS_PRIMARY_FIELD as i32,
+    );
 }
 
 /// Fill the template table from the search box. The row order here is the
@@ -1218,13 +1328,9 @@ fn ask_text(ui: &Ui, message: &str, caption: &str, default: &str) -> Option<Stri
 /// A yes/no question, defaulting to "no" in wording so a stray Enter does not
 /// delete something.
 fn confirm(ui: &Ui, message: &str) -> bool {
-    let dlg = MessageDialog::builder(
-        &ui.frame,
-        message,
-        "wireutils",
-    )
-    .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
-    .build();
+    let dlg = MessageDialog::builder(&ui.frame, message, "wireutils")
+        .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
+        .build();
     dlg.set_yes_no_labels("Yes", "No");
     dlg.show_modal() == ID_YES
 }
