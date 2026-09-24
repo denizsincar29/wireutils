@@ -148,8 +148,15 @@ fn start(_app: &App) -> i32 {
     //
     // Created with one field: the text is the whole message here, and a window
     // that splits it into panes reads worse aloud than a single full-width
-    // line.
-    frame.create_status_bar(1, StatusBarStyle::Default as i64, ID_NONE, "statusbar");
+    // line. Built through the builder rather than `Frame::create_status_bar`:
+    // the raw call has neither `StatusBarStyle` nor `ID_NONE` in the prelude
+    // (wxdragon exports both only from its own modules) and it returns the bar
+    // without attaching it to the frame — `set_status_text` on the frame would
+    // still aim at a window that has none. The builder does both.
+    StatusBar::builder(&frame)
+        .with_fields_count(1)
+        .add_initial_text(0, "statusbar")
+        .build();
 
     let ui = build_body(&frame, &shared);
     frame.centre();
@@ -280,7 +287,7 @@ fn build_menu(frame: &Frame, ui: &Ui, shared: &Shared) -> MenuBar {
     // The bar is not `Clone` in wxdragon 0.9, so there is exactly one binding
     // and the handler goes on it: `on_menu_selected` takes `&self` and returns
     // nothing, which leaves the value usable as the return value below.
-    let mut menu_bar = MenuBar::builder()
+    let menu_bar = MenuBar::builder()
         .append(
             Menu::builder()
                 .append_item(ID_PICK_DIR, "Config folder…", "Choose the folder of .conf files")
