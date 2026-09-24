@@ -58,6 +58,14 @@ const ID_APPLY: i32 = ID_HIGHEST + 2;
 const ID_UPDATE_TPL: i32 = ID_HIGHEST + 3;
 const ID_IMPORT: i32 = ID_HIGHEST + 4;
 
+/// Set once if a menu click arrives carrying an id we never handed out.
+/// Event dispatch repeats the same bogus id for every click, and a dialog per
+/// click would be unbearable, so the first one is reported in full and the
+/// rest stay quiet. Deliberately not a `Cell<bool>` guard around the whole
+/// handler: if clicks do arrive, the actions still have to run.
+static MENU_ID_UNKNOWN_REPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Run the application. Returns the process exit code.
 ///
 /// The exit code is carried out of the closure in a `Cell` rather than a
@@ -296,7 +304,24 @@ fn build_menu(frame: &Frame, ui: &Ui, shared: &Shared) -> MenuBar {
             Some(id) if id == ID_EXIT => {
                 frame_for_menu.close(true);
             }
-            _ => {}
+            // A click the menu bar could not name must never look like a dead
+            // menu. There are two shapes this can take — an id that is not
+            // one of ours, and no id at all — and both used to fall into a
+            // silent `_ => {}`, where the owner clicks "Config folder…" and
+            // sees nothing happen with nothing to report. Say what arrived
+            // instead, once, so the symptom turns into a fact we can act on.
+            other => {
+                use std::sync::atomic::Ordering;
+                if !MENU_ID_UNKNOWN_REPORTED.swap(true, Ordering::Relaxed) {
+                    let seen = match other {
+                        Some(id) => format!("id {id}"),
+                        None => "no id at all".to_string(),
+                    };
+                    ui_for_menu.set_status(&format!(
+                        "Menu click seen but not recognised ({seen}); expected {ID_PICK_DIR}..{ID_IMPORT}. Report this line."
+                    ));
+                }
+            }
         }
     });
 
@@ -752,6 +777,23 @@ fn wire(
 // The actions
 // ---------------------------------------------------------------------------
 
+/// Note a dialog result we did not expect, so a picker that opens and then
+/// refuses to accept anything is not silent.
+///
+/// `show_modal()` returning something other than `ID_OK` is a normal cancel —
+/// that is most of what happens. The case worth writing down is a result that
+/// is neither `ID_OK` nor a known cancel code, because then the dialog did
+/// return and its answer is simply not what this code matched on, which is a
+/// fact about the binding rather than about the owner's clicking.
+fn note_odd_dialog_result(ui: &Ui, what: &str, got: i32) {
+    if got == ID_OK || got == ID_CANCEL {
+        return;
+    }
+    ui.set_status(&format!(
+        "{what}: dialog returned {got}, which is neither OK ({ID_OK}) nor Cancel ({ID_CANCEL}). The path was treated as not chosen."
+    ));
+}
+
 /// Ask for the folder of `.conf` files and remember it. Returns true when a
 /// folder was chosen and saved.
 fn ask_conf_dir(frame: &Frame, ui: &Ui, shared: &Shared) -> bool {
@@ -763,7 +805,9 @@ fn ask_conf_dir(frame: &Frame, ui: &Ui, shared: &Shared) -> bool {
         &current,
     )
     .build();
-    if dlg.show_modal() != ID_OK {
+    let result = dlg.show_modal();
+    if result != ID_OK {
+        note_odd_dialog_result(ui, "Config folder", result);
         return false;
     }
     let Some(path) = dlg.get_path() else {
@@ -799,7 +843,9 @@ fn ask_base_conf(frame: &Frame, ui: &Ui, shared: &Shared) -> bool {
         .with_message("Pick a base WireGuard config. Its AllowedIPs become hosts in your list.")
         .with_default_dir(&current)
         .build();
-    if dlg.show_modal() != ID_OK {
+    let result = dlg.show_modal();
+    if result != ID_OK {
+        note_odd_dialog_result(ui, "Base config", result);
         return false;
     }
     let Some(path) = dlg.get_path() else {
