@@ -234,7 +234,7 @@ pub fn run(tunnel: String, url: String) -> i32 {
     // chance to leave the truth on it.
     if let Some((icon, verdict)) = startup.borrow().as_ref() {
         if let Some(bmp) = bitmap_for(verdict) {
-            icon.set_icon(bmp, &format!("wireutils — {verdict}"));
+            icon.set_icon(&bmp, &format!("wireutils — {verdict}"));
         }
     }
 
