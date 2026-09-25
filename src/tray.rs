@@ -62,6 +62,11 @@ pub fn run(tunnel: String, url: String) -> i32 {
     // `TaskBarIcon` does not implement `Copy`, and every `let x = icon` moves
     // it, so the second one fails to compile.
     let startup: Rc<RefCell<Option<(Rc<TaskBarIcon>, String)>>> = Rc::new(RefCell::new(None));
+    // The cell the main loop writes into and this side reads back, and the
+    // cell this side keeps. It has to be cloned here: `main` takes a `move`
+    // closure, so the handle that travels inside is a second owner, and the
+    // original cannot follow it.
+    let startup_clone = startup.clone();
 
     let outcome = wxdragon::main(move |app| {
         // wxWidgets ends the main loop when the last top-level window closes,
@@ -237,12 +242,12 @@ pub fn run(tunnel: String, url: String) -> i32 {
     // paint is worth doing: the main loop is over, but the notification-area
     // icon outlives it for as long as the process does, and this is the last
     // chance to leave the truth on it.
-    // Drained out of the cell and matched by value: `*startup.borrow()` is a
-    // place expression only for `Copy` contents, and an `Rc` is not one — a
-    // `ref` pattern there is still a borrow of a temporary, taken *before* the
-    // partial move the match performs. Taking the value outright ends the
-    // borrow first, and there is nothing left to read it afterwards anyway.
-    if let Some((icon, verdict)) = startup.borrow_mut().take() {
+    // `main` took its own clone of the cell — the `move` closure above cannot
+    // borrow from here — so this side still holds the original. Drained and
+    // matched by value: an `Rc` is not `Copy`, which is both why the pattern
+    // takes it out rather than looking at it, and why the clone below is not
+    // optional.
+    if let Some((icon, verdict)) = startup_clone.borrow_mut().take() {
         if let Some(bmp) = bitmap_for(&verdict) {
             icon.set_icon(&bmp, &format!("wireutils — {verdict}"));
         }
