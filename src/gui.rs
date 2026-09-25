@@ -101,6 +101,21 @@ const ID_CTX_GROUP_UNGROUP: i32 = ID_CTX_GROUP_PURGE + 1;
 /// unrecognised-id report. New items go before this line, always.
 const ID_CTX_LAST: i32 = ID_CTX_GROUP_UNGROUP;
 
+/// The address a per-address menu item was built for.
+///
+/// A context-menu click delivers its own id and nothing else — not the row it
+/// was raised over and certainly not which of the row's addresses the item
+/// named. With two addresses on a host the menu holds two items carrying the
+/// same id, and the handler cannot tell them apart from the event. So the
+/// address is remembered when the menu is built and read back when the item
+/// fires; `row_action` falls back to the row's first address if the slot is
+/// empty (a keyboard-invoked click that never raised a menu).
+///
+/// One slot is enough: a menu is modal, so a second menu cannot be built
+/// while the first is open, and nothing else writes this. It is cleared after
+/// every use rather than left to be re-read by the next action.
+static PENDING_ADDRESS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 /// Set once if a menu click arrives carrying an id we never handed out.
 /// Event dispatch repeats the same bogus id for every click, and a dialog per
 /// click would be unbearable, so the first one is reported in full and the
@@ -477,8 +492,13 @@ fn build_body(frame: &Frame, shared: &Shared, status_bar: Option<StatusBar>) -> 
         StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &panel, "Hosts").build();
 
     let table = DataViewListCtrl::builder(&panel).build();
+    // "Domain", not "Host": the column leads with the domain and falls back
+    // to the address only when there is no domain to lead with, so the honest
+    // heading is the one that is usually in it. A screen reader announces the
+    // column name before the value, and "Host: github.com" tells the owner
+    // less than "Domain: github.com".
     table.append_text_column(
-        "Host",
+        "Domain",
         0,
         DataViewAlign::Left,
         260,
@@ -936,12 +956,29 @@ fn host_menu(ui: &Ui, shared: &Shared, row: usize) {
     // line holds several addresses and they are removed one at a time — the
     // owner asked for exactly this ("удаление адреса — делит") — so the menu
     // has to be able to name a single one.
+    //
+    // The prefix is spelled out rather than left as `/32`. It is a bit count:
+    // `/24` means "the first 24 bits are the network, the rest is anyone", and
+    // a bare `/32` tells the owner nothing about how much of the internet that
+    // is. The address column keeps the short form because a list of twenty
+    // rows with the words in it stops being scannable.
     for addr in &addresses {
         menu = menu.append_item(
             ID_CTX_REMOVE_IP,
-            &format!("Remove address {addr} from the configs"),
+            &format!(
+                "Remove {addr}{} from the configs",
+                if mask_words(addr).is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", mask_words(addr))
+                }
+            ),
             "Takes this one address out of every .conf, leaving the others",
         );
+        // Which address this item means, for the handler that only gets an id.
+        if let Ok(mut slot) = PENDING_ADDRESS.lock() {
+            *slot = Some(addr.clone());
+        }
     }
 
     if !groups.is_empty() {
@@ -959,7 +996,30 @@ fn host_menu(ui: &Ui, shared: &Shared, row: usize) {
     show(&ui.table, &mut menu);
 }
 
+/// A prefix length in words, for a menu label.
+///
+/// The owner learned `/24` as "a 24-bit mask" and wants it said that way. The
+/// number is the count of leading bits that belong to the network — the same
+/// `/24` WireGuard writes — so the wording names the number that is on the
+/// screen rather than a second number derived from it.
+fn mask_words(entry: &str) -> String {
+    match entry.split_once('/') {
+        Some((_, bits)) if bits.chars().all(|c| c.is_ascii_digit()) && !bits.is_empty() => {
+            format!("({bits}-bit mask)")
+        }
+        // An address written without a prefix is one machine, which is a mask
+        // too — of all the bits there are — but saying so would be inventing a
+        // length the file does not have.
+        _ => String::new(),
+    }
+}
+
 /// Open a menu for a widget, at the position wx says the click happened.
+///
+/// A wrong status-bar field index also landed here once: wxWidgets asserts
+/// `(unsigned)number < m_panes.size()`, which aborts a debug build and does
+/// nothing at all in release, so the mistake compiled and the line simply
+/// never appeared. The index is a named constant for that reason.
 ///
 /// `popup_menu` lives on the `WxWidget` trait, which every widget derefs to,
 /// and it wants a `&mut Menu` — the builder hands back an owned one, so it has
@@ -980,10 +1040,16 @@ fn group_menu(ui: &Ui, shared: &Shared, group: &str) {
         (hosts, entries.len())
     };
 
+    // The first item is the one the owner went looking for and could not find
+    // ("хочу удалить гитхаб группу из всех адресов в конфиге, но не знаю как").
+    // It is first because it is the only one of the three that changes any
+    // file, and because it is the safe one: the group stays in the list, so
+    // the same addresses can be written back with one click when they are
+    // wanted again. Dropping the group is the destructive half and it asks.
     let mut menu = Menu::builder()
         .append_item(
             ID_CTX_GROUP_REMOVE,
-            &format!("Remove group {group}'s addresses from the configs…"),
+            &format!("Remove {group}'s {addresses} address(es) from the configs…"),
             "Edits every .conf in the folder; the group and its hosts stay in the list",
         )
         .append_separator()
@@ -994,8 +1060,8 @@ fn group_menu(ui: &Ui, shared: &Shared, group: &str) {
         )
         .append_item(
             ID_CTX_GROUP_PURGE,
-            "Do both: take the addresses out and drop the group…",
-            &format!("{addresses} address(es) leave the .conf files and the group leaves the list"),
+            &format!("Do both: take the {addresses} address(es) out and drop the group…"),
+            "The group leaves the list as well, so the removal cannot be undone from here",
         )
         .build();
     show(&ui.group_remove, &mut menu);
@@ -1240,28 +1306,42 @@ fn with_group(ui: &Ui, shared: &Shared, action: impl Fn(&Ui, &Shared, String)) {
     }
 }
 
-/// Remove the host on `row` from the configs — every address it put there,
-/// one entry at a time, with the other entries on each line left standing.
+/// Remove the address the menu item named, from the configs.
+///
+/// The address comes from [`PENDING_ADDRESS`], not from the row: a host whose
+/// domain resolves to two addresses has two menu items carrying one id, and
+/// the click does not say which was chosen. Reading the row instead made both
+/// items remove the first address, so the second one appeared to do nothing
+/// and left the file as it was — a silent no-op on a command whose whole point
+/// is that it edits files.
+///
+/// It falls back to the row's first address when the slot is empty, which is
+/// the case for a menu invoked without a popup (a keyboard accelerator). One
+/// entry is removed per run: two passes over the folder for one click would
+/// report two removals and one confirmation, and the menu says "address",
+/// singular, for that reason.
 fn remove_address_row(ui: &Ui, shared: &Shared, row: usize) {
     let (label, address) = {
         let st = shared.borrow();
         match st.store.hosts.get(row) {
             Some(h) => {
                 let entries = h.allowed_entries();
-                let Some(first) = entries.first() else {
+                if entries.is_empty() {
                     ui.set_status(&format!(
                         "{} has no addresses yet — resolve it first, or nothing in the configs can match it.",
                         h.label()
                     ));
                     return;
+                }
+                let chosen = chosen_address();
+                // Only an address this host actually contributes: a stale slot
+                // holding another row's address would edit the folder for a
+                // host the owner did not point at.
+                let address = match chosen.filter(|a| entries.contains(a)) {
+                    Some(a) => a,
+                    None => entries[0].clone(),
                 };
-                // One entry per host is the shape a host has: a domain that
-                // resolves to two addresses would need two passes over the
-                // folder, and doing them here would report two removals for
-                // one click. The menu says "address", singular, for that
-                // reason — and the label is shown so a multi-address host is
-                // visibly only partly done.
-                (h.label().to_string(), first.clone())
+                (h.label().to_string(), address)
             }
             None => {
                 ui.set_status("That row is gone — the list changed underneath.");
@@ -1271,6 +1351,15 @@ fn remove_address_row(ui: &Ui, shared: &Shared, row: usize) {
     };
     remove_address(ui, shared, &address);
     ui.set_status(&format!("{label}: last status line above."));
+}
+
+/// Take the address the last-built menu item was for, and clear the slot.
+///
+/// Taken rather than peeked: the value belongs to one click, and leaving it
+/// behind would let the next keyboard-invoked removal act on an address the
+/// owner chose minutes ago in a different menu.
+fn chosen_address() -> Option<String> {
+    PENDING_ADDRESS.lock().ok().and_then(|mut slot| slot.take())
 }
 
 /// Take one host out of the list. The `.conf` files are deliberately not
@@ -1762,13 +1851,43 @@ fn refresh(ui: &Ui, shared: &Shared) {
 /// why, in the words of the state column, rather than showing a blank.
 fn addresses_cell(h: &crate::Host) -> String {
     if h.ips.is_empty() {
-        return String::new();
+        // A host whose target is already an address has nothing to add here:
+        // the address column above holds it, and repeating it would be one
+        // fact printed twice under two headings.
+        if h.is_literal_ip() {
+            return String::new();
+        }
+        // A domain whose addresses are fetched at write time. The column is
+        // not empty by accident and must not read as if it were, so it says
+        // where the value comes from.
+        return "the address the domain takes".to_string();
     }
+    // A bare `/32` or `/128` is dropped: it is the prefix every entry has
+    // unless the owner wrote otherwise, so printing it turns a column of
+    // numbers into a column of numbers with a tail. A prefix that *is* a
+    // network keeps its own, because there the number changes what the route
+    // covers — and `state_cell` explains those in words anyway.
+    let shown: Vec<String> = h.ips.iter().map(|ip| drop_default_prefix(ip)).collect();
     if h.ips.len() <= 3 {
-        h.ips.join(", ")
+        shown.join(", ")
     } else {
-        format!("{} … ({} addresses)", h.ips[0], h.ips.len())
+        format!("{} … ({} addresses)", shown[0], h.ips.len())
     }
+}
+
+/// An address without its default prefix: `10.0.0.1/32` prints as `10.0.0.1`,
+/// `10.0.0.0/8` keeps its `/8`.
+fn drop_default_prefix(entry: &str) -> String {
+    for default in ["/32", "/128"] {
+        if let Some(bare) = entry.strip_suffix(default) {
+            // Only for a single host address: `2001:db8::/32` ends in `/32`
+            // but is a network, and the words for it live in the state column.
+            if !bare.contains('/') && mask_note(entry).is_none() {
+                return bare.to_string();
+            }
+        }
+    }
+    entry.to_string()
 }
 
 /// The state column: the answer to "why is this site still not in the tunnel",
