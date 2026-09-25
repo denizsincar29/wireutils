@@ -61,7 +61,7 @@ pub fn run(tunnel: String, url: String) -> i32 {
     // result is known. That is also what keeps `set_icon` in one function —
     // `TaskBarIcon` does not implement `Copy`, and every `let x = icon` moves
     // it, so the second one fails to compile.
-    let startup: Rc<RefCell<Option<(TaskBarIcon, String)>>> = Rc::new(RefCell::new(None));
+    let startup: Rc<RefCell<Option<(Rc<TaskBarIcon>, String)>>> = Rc::new(RefCell::new(None));
 
     let outcome = wxdragon::main(move |app| {
         // wxWidgets ends the main loop when the last top-level window closes,
@@ -130,8 +130,11 @@ pub fn run(tunnel: String, url: String) -> i32 {
         }
 
         // One timer for the lifetime of the app. `Timer` needs an owner that
-        // implements `WxEvtHandler`, and the icon is one.
-        let timer = Timer::new(&icon);
+        // implements `WxEvtHandler`, and the icon is one — but the handle is
+        // an `Rc<TaskBarIcon>`, and `Rc<T>` is not itself an event handler.
+        // Dereferencing gives `&TaskBarIcon`, which is: the `Rc` stays the
+        // owner of the lifetime, the timer only borrows the handler.
+        let timer = Timer::new(&*icon);
         {
             let state = state.clone();
             let paint = paint.clone();
@@ -231,7 +234,7 @@ pub fn run(tunnel: String, url: String) -> i32 {
     // chance to leave the truth on it.
     if let Some((icon, verdict)) = startup.borrow().as_ref() {
         if let Some(bmp) = bitmap_for(verdict) {
-            icon.set_icon(&bmp, &format!("wireutils — {verdict}"));
+            icon.set_icon(bmp, &format!("wireutils — {verdict}"));
         }
     }
 
@@ -285,13 +288,13 @@ fn bitmap_for(outcome: &str) -> Option<Bitmap> {
         .or_else(|| ArtProvider::get_bitmap(ArtId::Help, ArtClient::Menu, Some(Size::new(16, 16))))
 }
 
-/// Tell the owner something he did not ask for yet.
+/// A place for a menu answer to be delivered out-of-band, if one is ever
+/// wanted. Today it deliberately delivers nothing.
 ///
-/// A direct answer to a menu click does not belong in a balloon: he clicked,
-/// the popup closed, and a balloon that appears afterwards is a second thing
-/// to read. It is logged instead, where a screenshot of the log answers "what
-/// did the tray do at 14:20" — and the tooltip on the icon has already been
-/// rewritten with the same sentence by the caller.
+/// A direct answer to a menu click does not belong in a balloon: the owner
+/// clicked, the popup closed, and a balloon arriving afterwards is a second
+/// thing to read — the tooltip already carries the same sentence by the time
+/// this is called.
 fn answer(_text: &str) {
     // Nothing to do: the caller has already put this same sentence on the
     // icon's tooltip, which is where a tray app's output belongs. Left as a

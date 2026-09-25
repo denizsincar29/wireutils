@@ -15,7 +15,7 @@ winresource = "0.1"
 default = []
 # The wx GUI. Without it the crate builds as a plain library + logic tests,
 # which is all that can be verified in a container with no wx and no display.
-gui = ["dep:wxdragon", "dep:log"]
+gui = ["dep:wxdragon"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -24,10 +24,6 @@ serde_json = "1"
 # container build has nothing to compile but Rust.
 ureq = { version = "2", default-features = false, features = ["json"] }
 wxdragon = { version = "0.9", optional = true }
-# Tray diagnostics. Windows GUI subsystem builds have no console, so a line
-# printed to stdout goes nowhere; the `log` facade is the seam that lets the
-# tray say why it did nothing without dragging a backend into the library.
-log = { version = "0.4", optional = true }
 
 [lib]
 name = "wireutils"
