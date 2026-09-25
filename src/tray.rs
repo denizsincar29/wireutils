@@ -11,7 +11,7 @@
 //!
 //! There is no main window. On Windows a tray app with a window is a window
 //! that can be closed by mistake and a process that lingers after it; the menu
-//! is the whole interface, and [`prevent_exit_on_last_window`] is what keeps
+//! is the whole interface, and `set_exit_on_frame_delete(false)` is what keeps
 //! the process alive when wxWidgets thinks it has nothing left to show.
 //!
 //! The tray is deliberately thin. Everything it does is one call into
