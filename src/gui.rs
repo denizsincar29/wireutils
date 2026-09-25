@@ -398,6 +398,38 @@ fn build_menu(frame: &Frame, ui: &Ui, shared: &Shared) -> MenuBar {
             Some(id) if id == ID_IMPORT => {
                 ask_base_conf(&frame_for_menu, &ui_for_menu, &shared_for_menu);
             }
+            // The context menus report through the same channel and the same
+            // id range — `get_menu_id()` cannot tell a popup from the menu
+            // bar — so every item the two popups can raise is dispatched
+            // here, next to the file menu's own. The row these act on is not
+            // in the event: it is the table's live selection, which is where
+            // the right-click left it.
+                    Some(id) if id == ID_CTX_RENAME => {
+                row_action(&ui_for_menu, &shared_for_menu, |ui, shared, row| {
+                    rename_row(ui, shared, row);
+                })
+            }
+            Some(id) if id == ID_CTX_REMOVE => row_action(&ui_for_menu, &shared_for_menu, remove_row),
+            Some(id) if id == ID_CTX_REMOVE_IP => row_action(&ui_for_menu, &shared_for_menu, remove_address_row),
+            Some(id) if id == ID_CTX_TO_GROUP => with_group(&ui_for_menu, &shared_for_menu, |ui, shared, group| {
+                add_selected_to_group_named(ui, shared, &group)
+            }),
+            Some(id) if id == ID_CTX_FROM_GROUP => with_group(&ui_for_menu, &shared_for_menu, |ui, shared, group| {
+                let Some(row) = ui.table.get_selected_row() else {
+                    ui.set_status("Select a host first, then use the menu on it.");
+                    return;
+                };
+                remove_row_from_group(ui, shared, row, &group)
+            }),
+            Some(id) if id == ID_CTX_GROUP_REMOVE => with_group(&ui_for_menu, &shared_for_menu, |ui, shared, group| {
+                remove_group_from_configs(ui, shared, &group, false)
+            }),
+            Some(id) if id == ID_CTX_GROUP_PURGE => with_group(&ui_for_menu, &shared_for_menu, |ui, shared, group| {
+                remove_group_from_configs(ui, shared, &group, true)
+            }),
+            Some(id) if id == ID_CTX_GROUP_UNGROUP => with_group(&ui_for_menu, &shared_for_menu, |ui, shared, group| {
+                forgot_the_files(ui, shared, &group)
+            }),
             Some(id) if id == ID_EXIT => {
                 frame_for_menu.close(true);
             }
@@ -1182,6 +1214,65 @@ fn rename_row(ui: &Ui, shared: &Shared, row: usize) -> bool {
     }
 }
 
+/// Run one row-scoped action on the table's current selection.
+///
+/// A context-menu item reports only its own id — the row it was raised on is
+/// not in the event — so the selection *is* the argument. That is also what
+/// makes these items work from the keyboard: Tab to the table, move to a row,
+/// press the Menu key, pick the item, and the row under the cursor is the one
+/// acted on.
+fn row_action(ui: &Ui, shared: &Shared, action: fn(&Ui, &Shared, usize)) {
+    match ui.table.get_selected_row() {
+        Some(row) => action(ui, shared, row),
+        None => ui.set_status("Select a host in the list first."),
+    }
+}
+
+/// Run one group-scoped action from the group list's menu.
+///
+/// The group comes from the list itself rather than from a parameter, for the
+/// same reason as [`row_action`]: whatever is selected when the menu item is
+/// chosen is the group the owner was looking at.
+fn with_group(ui: &Ui, shared: &Shared, action: impl Fn(&Ui, &Shared, String)) {
+    match ui.group_choice.get_string_selection() {
+        Some(group) => action(ui, shared, group),
+        None => ui.set_status("Pick a group from the list first."),
+    }
+}
+
+/// Remove the host on `row` from the configs — every address it put there,
+/// one entry at a time, with the other entries on each line left standing.
+fn remove_address_row(ui: &Ui, shared: &Shared, row: usize) {
+    let (label, address) = {
+        let st = shared.borrow();
+        match st.store.hosts.get(row) {
+            Some(h) => {
+                let entries = h.allowed_entries();
+                let Some(first) = entries.first() else {
+                    ui.set_status(&format!(
+                        "{} has no addresses yet — resolve it first, or nothing in the configs can match it.",
+                        h.label()
+                    ));
+                    return;
+                };
+                // One entry per host is the shape a host has: a domain that
+                // resolves to two addresses would need two passes over the
+                // folder, and doing them here would report two removals for
+                // one click. The menu says "address", singular, for that
+                // reason — and the label is shown so a multi-address host is
+                // visibly only partly done.
+                (h.label().to_string(), first.clone())
+            }
+            None => {
+                ui.set_status("That row is gone — the list changed underneath.");
+                return;
+            }
+        }
+    };
+    remove_address(ui, shared, &address);
+    ui.set_status(&format!("{label}: last status line above."));
+}
+
 /// Take one host out of the list. The `.conf` files are deliberately not
 /// touched: an address already written into twenty files is still there
 /// afterwards, and the status line says so.
@@ -1422,12 +1513,22 @@ fn forgot_the_files(ui: &Ui, shared: &Shared, group: &str) {
     }
 }
 
-/// Add every selected host to the chosen group.
+/// Add every selected host to the group picked in the list.
 fn add_selected_to_group(ui: &Ui, shared: &Shared) {
     let Some(group) = ui.group_choice.get_string_selection() else {
         ui.set_status("Pick a group from the list first.");
         return;
     };
+    add_selected_to_group_named(ui, shared, &group);
+}
+
+/// Add every selected host to `group`, named by the caller.
+///
+/// Split out of the button handler because the group's own context menu
+/// arrives with the group already in hand — the entry was chosen under it —
+/// and re-reading the picker there would silently use whatever group happened
+/// to be selected instead.
+fn add_selected_to_group_named(ui: &Ui, shared: &Shared, group: &str) {
     // All selected rows, so several hosts can be grouped in one go.
     let rows = selected_rows(&ui.table);
     if rows.is_empty() {
@@ -1439,8 +1540,8 @@ fn add_selected_to_group(ui: &Ui, shared: &Shared) {
         let mut st = shared.borrow_mut();
         for i in &rows {
             if let Some(h) = st.store.hosts.get_mut(*i) {
-                if !h.groups.contains(&group) {
-                    h.groups.push(group.clone());
+                if !h.groups.iter().any(|g| g == group) {
+                    h.groups.push(group.to_string());
                     moved += 1;
                 }
             }
