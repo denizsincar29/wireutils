@@ -616,8 +616,11 @@ fn build_body(frame: &Frame, shared: &Shared, status_bar: Option<StatusBar>) -> 
         apply_btn,
         dir_btn,
         import_btn,
+        // The "New group…" button is bound in `build_body` where it is
+        // created and nothing here needs to read it back; it travels in the
+        // signature anyway so the call site has to name every group control
+        // in one place rather than one of them quietly living elsewhere.
         group_add,
-        group_apply_btn,
     );
     ui
 }
@@ -640,8 +643,12 @@ fn wire(
     apply_btn: Button,
     dir_btn: Button,
     import_btn: Button,
-    group_add: Button,
     group_apply_btn: Button,
+    // The "New group…" button is bound in `build_body`, where it is created —
+    // it is the one group control that does not go through `Ui`, because
+    // nothing else needs to read it back. Named in the signature anyway so
+    // that reads as a decision and not as an omission.
+    _group_add: Button,
 ) {
     // --- adding a host ----------------------------------------------------
     {
@@ -715,7 +722,7 @@ fn wire(
                     }
                 },
             };
-            host_menu(&ui, &shared, row, &event);
+            host_menu(&ui, &shared, row);
         });
     }
 
@@ -878,7 +885,7 @@ fn wire(
 /// The menu for one host row. Built fresh on every right-click, so the items
 /// reflect the row as it is now: an address item appears only when there is an
 /// address to name, and the group items only when there is a group.
-fn host_menu(ui: &Ui, shared: &Shared, row: usize, event: &DataViewEvent) {
+fn host_menu(ui: &Ui, shared: &Shared, row: usize) {
     let (label, groups, addresses) = {
         let st = shared.borrow();
         match st.store.hosts.get(row) {
@@ -964,8 +971,7 @@ fn group_menu(ui: &Ui, shared: &Shared, group: &str) {
             &format!("{addresses} address(es) leave the .conf files and the group leaves the list"),
         )
         .build();
-    let _ = event;
-    show(&ui.group_choice, &mut menu);
+    show(&ui.group_apply_btn, &mut menu);
 }
 
 // ---------------------------------------------------------------------------
