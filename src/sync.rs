@@ -315,15 +315,12 @@ mod tests {
         // nothing about the code under test. `temp_dir` is the honest stand-in
         // for "wherever the owner points this". (This test passed here and
         // failed on CI, which is exactly what a hard-coded separator buys.)
+        let _guard = STORE_ENV.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join("wireutils_store_test");
-        let old = std::env::var("WIREUTILS_CONF_STORE").ok();
         std::env::set_var("WIREUTILS_CONF_STORE", &dir);
         assert_eq!(config_store_dir(), dir);
         assert_eq!(config_path("vasilisa").unwrap(), dir.join("vasilisa.conf"));
-        match old {
-            Some(v) => std::env::set_var("WIREUTILS_CONF_STORE", v),
-            None => std::env::remove_var("WIREUTILS_CONF_STORE"),
-        }
+        std::env::remove_var("WIREUTILS_CONF_STORE");
     }
 
     #[test]
@@ -338,8 +335,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Both tests that touch `$WIREUTILS_CONF_STORE` hold this first.
+    ///
+    /// The variable is process-wide and `cargo test` runs the tests on
+    /// threads, so without a lock one test's override is read by another's
+    /// `config_path` — which is not a hypothetical: it turned CI red on a
+    /// commit that changed nothing about either test. The lock is also why
+    /// neither of these tests needs the old value saved and restored; while
+    /// it is held, nobody else is looking at the variable.
+    static STORE_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn install_writes_and_then_reports_unchanged() {
+        let _guard = STORE_ENV.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join("wireutils_sync_install");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
