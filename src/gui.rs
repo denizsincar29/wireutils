@@ -965,14 +965,7 @@ fn host_menu(ui: &Ui, shared: &Shared, row: usize) {
     for addr in &addresses {
         menu = menu.append_item(
             ID_CTX_REMOVE_IP,
-            &format!(
-                "Remove {addr}{} from the configs",
-                if mask_words(addr).is_empty() {
-                    String::new()
-                } else {
-                    format!(" {}", mask_words(addr))
-                }
-            ),
+            &format!("Remove {}{} from the configs", drop_default_prefix(addr), mask_in_words(addr)),
             "Takes this one address out of every .conf, leaving the others",
         );
         // Which address this item means, for the handler that only gets an id.
@@ -994,24 +987,6 @@ fn host_menu(ui: &Ui, shared: &Shared, row: usize) {
 
     let mut menu = menu.build();
     show(&ui.table, &mut menu);
-}
-
-/// A prefix length in words, for a menu label.
-///
-/// The owner learned `/24` as "a 24-bit mask" and wants it said that way. The
-/// number is the count of leading bits that belong to the network — the same
-/// `/24` WireGuard writes — so the wording names the number that is on the
-/// screen rather than a second number derived from it.
-fn mask_words(entry: &str) -> String {
-    match entry.split_once('/') {
-        Some((_, bits)) if bits.chars().all(|c| c.is_ascii_digit()) && !bits.is_empty() => {
-            format!("({bits}-bit mask)")
-        }
-        // An address written without a prefix is one machine, which is a mask
-        // too — of all the bits there are — but saying so would be inventing a
-        // length the file does not have.
-        _ => String::new(),
-    }
 }
 
 /// Open a menu for a widget, at the position wx says the click happened.
@@ -1906,7 +1881,7 @@ fn state_cell(h: &crate::Host) -> String {
             // waiting for a resolve pass like any domain.
             return "not resolved".to_string();
         }
-        return format!("not resolved — {}", mask_words(h.target.as_str()));
+        return format!("not resolved — {}", mask_in_words(h.target.as_str()));
     }
     // The prefix, in words, for the single-address and small rows. Each
     // address that is a network gets its own clause; `select` would have been
@@ -1945,12 +1920,23 @@ fn mask_note(entry: &str) -> Option<String> {
     ))
 }
 
-/// The same fact for a target the owner typed, which may be an unresolved
-/// name — in which case there is no prefix to explain and nothing to say.
-fn mask_words(target: &str) -> String {
-    match mask_note(target) {
-        Some(note) => note,
-        None => "no address yet".to_string(),
+/// The mask of a `target` the owner typed, in words — see [`mask_note`]. The
+/// wording is the same one the state column uses (`a network: 256 addresses
+/// (mask 24 bits)`), because the two places explain the same number and a
+/// second phrasing for it would only be a second thing to learn.
+pub fn mask_in_words(target: &str) -> String {
+    // A target with no prefix is a plain host, and saying "no address yet"
+    // about an address that is right there would be simply wrong; the caller
+    // [`addresses_cell`] asks this only where the answer is printed after a
+    // colon, so an empty string is the honest thing to hand back.
+    match target.rsplit_once('/') {
+        Some((_, bits)) if !bits.is_empty() && bits.chars().all(|c| c.is_ascii_digit()) => {
+            match mask_note(target) {
+                Some(note) => note,
+                None => format!("a single machine (mask {bits} bits)"),
+            }
+        }
+        _ => String::new(),
     }
 }
 
