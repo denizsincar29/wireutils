@@ -237,10 +237,12 @@ pub fn run(tunnel: String, url: String) -> i32 {
     // paint is worth doing: the main loop is over, but the notification-area
     // icon outlives it for as long as the process does, and this is the last
     // chance to leave the truth on it.
-    // Destructured by reference with `ref`, so the cell keeps its copy: the
-    // guards below still hold the `Rc` borrowed, and moving the `Rc` out of a
-    // match arm behind a `Ref` is an error, not an optimisation.
-    if let Some((ref icon, ref verdict)) = *startup.borrow() {
+    // Drained out of the cell and matched by value: `*startup.borrow()` is a
+    // place expression only for `Copy` contents, and an `Rc` is not one — a
+    // `ref` pattern there is still a borrow of a temporary, taken *before* the
+    // partial move the match performs. Taking the value outright ends the
+    // borrow first, and there is nothing left to read it afterwards anyway.
+    if let Some((icon, verdict)) = startup.borrow_mut().take() {
         if let Some(bmp) = bitmap_for(verdict) {
             icon.set_icon(&bmp, &format!("wireutils — {verdict}"));
         }
