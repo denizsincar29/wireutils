@@ -40,11 +40,14 @@
 //! * Every handler re-reads the store from `Shared` instead of keeping a
 //!   reference across calls, and every handler that changes the store saves it
 //!   before returning. `hosts.json` is the owner's only copy of the list.
-//! * A right-click on a *group* row opens the group's own menu, including
-//!   "Remove this group's addresses from the configs…". That is the command
-//!   the owner went looking for and could not find: the addresses are already
-//!   written into every `.conf`, so deleting the group from the list does
-//!   nothing to the files.
+//! * The group's own menu — including "Remove this group's addresses from the
+//!   configs…" — is on the "Group actions" button, not on the group list. That
+//!   command is the one the owner went looking for and could not find: the
+//!   addresses are already written into every `.conf`, so deleting the group
+//!   from the list does nothing to the files. It is not on the list itself
+//!   because a `Choice` is a native combo box — the popup a right-click would
+//!   raise is the popup of its own drop-down, and no context-menu event is
+//!   sent for it.
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -491,11 +494,9 @@ fn build_body(frame: &Frame, shared: &Shared, status_bar: Option<StatusBar>) -> 
 
     // --- groups -----------------------------------------------------------
     //
-    // The list is where a group's own menu lives, including the removal the
-    // owner could not find. `Group` is the word on the box because the table
-    // column above it is named the same; the two used to say "Groups" and
-    // "Groups" while meaning different things (one row's group, and every
-    // group there is).
+    // `Group` is the word on the box because the table column above it is
+    // named the same; the two used to say "Groups" and "Groups" while meaning
+    // different things (one row's group, and every group there is).
     let groups_box =
         StaticBoxSizerBuilder::new_with_label(Orientation::Horizontal, &panel, "Group").build();
     let group_choice = Choice::builder(&panel).build();
@@ -503,12 +504,12 @@ fn build_body(frame: &Frame, shared: &Shared, status_bar: Option<StatusBar>) -> 
     let group_apply_btn = Button::builder(&panel)
         .with_label("Add selected hosts to group")
         .build();
-    // Renamed from "Delete group": it removes the group from the list and
-    // leaves every address in every config, which is exactly the confusion
-    // this whole change is about. The context menu next door offers the other
-    // thing — taking the addresses out of the files — under its own name.
+    // Named for what it opens, not for one of the three things inside it. It
+    // used to say "Delete group" while only unlisting it, which is exactly the
+    // confusion this change is about: the addresses stay in every config, and
+    // the menu behind this button is where taking them out lives.
     let group_remove = Button::builder(&panel)
-        .with_label("Remove from list")
+        .with_label("Group actions…")
         .build();
     groups_box.add(&group_choice, 1, SizerFlag::All | SizerFlag::Expand, 6);
     groups_box.add(&group_add, 0, SizerFlag::All, 4);
@@ -615,6 +616,8 @@ fn build_body(frame: &Frame, shared: &Shared, status_bar: Option<StatusBar>) -> 
         apply_btn,
         dir_btn,
         import_btn,
+        group_add,
+        group_apply_btn,
     );
     ui
 }
@@ -637,6 +640,8 @@ fn wire(
     apply_btn: Button,
     dir_btn: Button,
     import_btn: Button,
+    group_add: Button,
+    group_apply_btn: Button,
 ) {
     // --- adding a host ----------------------------------------------------
     {
@@ -714,16 +719,24 @@ fn wire(
         });
     }
 
-    // --- the group list: right-click --------------------------------------
+    // --- the group list: the menu is on the button next to it -------------
+    //
+    // A `Choice` is a native combo box: the popup a right-click would raise is
+    // the popup of its own drop-down, so wx never delivers a context-menu
+    // event for it and there is nothing to bind to. The host table next door
+    // has no such problem — `DataViewListCtrl` reports item context menus
+    // itself. So the group's menu hangs off the button beside the list, which
+    // is where the owner's Tab already lands, and the Menu key reaches it like
+    // any other focusable control.
     {
         let ui = *ui;
         let shared = shared.clone();
-        ui.group_choice.on_context_menu(move |event| {
+        group_apply_btn.on_click(move |_| {
             let Some(group) = ui.group_choice.get_string_selection() else {
-                ui.set_status("Right-click a group in the list to see its actions.");
+                ui.set_status("Pick a group from the list first.");
                 return;
             };
-            group_menu(&ui, &shared, &group, &event);
+            group_menu(&ui, &shared, &group);
         });
     }
 
@@ -922,9 +935,10 @@ fn show(widget: &impl WxWidget, menu: &mut Menu) {
     widget.popup_menu(menu, None);
 }
 
-/// The menu for one group, opened from the group list or from a host row's own
-/// groups. This is where the command the owner could not find lives.
-fn group_menu(ui: &Ui, shared: &Shared, group: &str, event: &MenuEventData) {
+/// The menu for one group, opened from the "Group actions" button and from a
+/// host row's own group submenu. This is where the command the owner could not
+/// find lives.
+fn group_menu(ui: &Ui, shared: &Shared, group: &str) {
     let (hosts, addresses) = {
         let st = shared.borrow();
         let hosts = st.store.hosts_in_group(group).count();
