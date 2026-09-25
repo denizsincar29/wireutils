@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use wireutils::apply::{self, FileResult};
+use wireutils::apply::{self, ConfResult};
 use wireutils::hosts::HostStore;
 use wireutils::import::{self, Imported, PtrResolver};
 use wireutils::paths;
@@ -275,10 +275,19 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             let report = apply::apply(&store, &dir).map_err(|e| e.to_string())?;
             for (p, r) in &report.files {
+                // `removed` is on every variant, not only the written one:
+                // the same enum reports a write (where the whole value was
+                // replaced and the count is 0 or 1) and a removal (where some
+                // entries came out of a line whose others stayed). Printing it
+                // on every line is what makes an apply and a removal legible
+                // in the same run.
                 let what = match r {
-                    FileResult::Unchanged => "unchanged",
-                    FileResult::Written { .. } => "written",
-                    FileResult::NoAllowedIps => "SKIPPED — no AllowedIPs line",
+                    ConfResult::Unchanged { .. } => "unchanged".to_string(),
+                    ConfResult::Written { removed, .. } => format!("written, {removed} removed"),
+                    ConfResult::Emptied { removed } => format!(
+                        "SKIPPED — every one of its {removed} entries was being removed, and an empty AllowedIPs routes nothing"
+                    ),
+                    ConfResult::NoAllowedIps { .. } => "SKIPPED — no AllowedIPs line".to_string(),
                 };
                 println!("{}: {}", p.display(), what);
             }
