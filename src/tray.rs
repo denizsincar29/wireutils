@@ -55,6 +55,13 @@ pub fn run(tunnel: String, url: String) -> i32 {
         url,
         running: true,
     }));
+    // The startup fetch happens on this side of `main`, because `main` takes a
+    // closure and a closure cannot hand a value back out. The icon itself is
+    // built inside, so it travels through this cell: `Some` once the fetched
+    // result is known. That is also what keeps `set_icon` in one function —
+    // `TaskBarIcon` does not implement `Copy`, and every `let x = icon` moves
+    // it, so the second one fails to compile.
+    let startup: Rc<RefCell<Option<(TaskBarIcon, String)>>> = Rc::new(RefCell::new(None));
 
     let outcome = wxdragon::main(move |app| {
         // wxWidgets ends the main loop when the last top-level window closes,
@@ -92,23 +99,34 @@ pub fn run(tunnel: String, url: String) -> i32 {
         // makes the menu agree with it.
         menu.check_item(ID_TOGGLE_TUNNEL, true);
 
-        let icon = TaskBarIcon::builder()
-            .with_icon_type(TaskBarIconType::CustomStatusItem)
-            .build();
+        let icon = Rc::new(
+            TaskBarIcon::builder()
+                .with_icon_type(TaskBarIconType::CustomStatusItem)
+                .build(),
+        );
+
+        // The one place an icon is painted. Every caller below goes through
+        // it, both because the bitmap choice is the same everywhere and
+        // because `set_icon` takes `&self` and needs the handle *unmoved* —
+        // handed to a closure by reference, not by value.
+        let paint = {
+            let icon = icon.clone();
+            move |outcome: &str| {
+                if let Some(bmp) = &bitmap_for(outcome) {
+                    icon.set_icon(bmp, &format!("wireutils — {outcome}"));
+                }
+            }
+        };
         // No icon art ships with wxWidgets that means "a tunnel is up", so the
         // stock art carries the one bit a glance can absorb: this build wanted
         // to have fetched something.
-        let bitmap = ArtProvider::get_bitmap(ArtId::Help, ArtClient::Menu, Some(Size::new(16, 16)));
         icon.set_popup_menu(&mut menu);
-        match &bitmap {
-            // No art at all: the notification-area slot goes in empty and
-            // there is no tooltip to explain it. Establishing the icon is
-            // still the part that matters, so the `None` arm does nothing
-            // rather than skipping the whole setup.
-            Some(bmp) => {
-                icon.set_icon(bmp, "wireutils");
-            }
-            None => {}
+        // Seed the slot so the icon exists before the first fetch returns.
+        // `bitmap_for` reaches for the same stock art, and its fallback is
+        // why a missing bitmap here is survivable: the tray shows the icon,
+        // just without a picture until the fetch says something.
+        if let Some(bmp) = bitmap_for("") {
+            icon.set_icon(&bmp, "wireutils");
         }
 
         // One timer for the lifetime of the app. `Timer` needs an owner that
@@ -116,7 +134,7 @@ pub fn run(tunnel: String, url: String) -> i32 {
         let timer = Timer::new(&icon);
         {
             let state = state.clone();
-            let icon_for_tick = icon;
+            let paint = paint.clone();
             let mut last: Option<String> = None;
             timer.on_tick(move |_| {
                 let now = fetch_and_install(&state);
@@ -125,9 +143,7 @@ pub fn run(tunnel: String, url: String) -> i32 {
                 // minutes with the same sentence would be worse than useless,
                 // so it is written when the verdict changes and not otherwise.
                 if last.as_deref() != Some(now.as_str()) {
-                    if let Some(bmp) = &bitmap_for(&now) {
-                        icon_for_tick.set_icon(bmp, &format!("wireutils — {now}"));
-                    }
+                    paint(&now);
                     last = Some(now);
                 }
             });
@@ -137,24 +153,19 @@ pub fn run(tunnel: String, url: String) -> i32 {
         // Fetch once at startup rather than waiting ten minutes for the first
         // one: a recipient double-clicks the binary precisely because the
         // config should be in place now.
-        let mut last: Option<String> = None;
         let first = fetch_and_install(&state);
-        if let Some(bmp) = &bitmap {
-            icon.set_icon(bmp, &format!("wireutils — {first}"));
-        }
-        last = Some(first);
-        let last = Rc::new(RefCell::new(last));
+        paint(&first);
+        let last = Rc::new(RefCell::new(Some(first.clone())));
+        *startup.borrow_mut() = Some((icon.clone(), first));
 
         {
             let state = state.clone();
-            let icon_for_menu = icon;
+            let paint = paint.clone();
             let template = Rc::new(RefCell::new(menu));
             let last = last.clone();
             icon.on_menu(move |event| {
                 let settle = |text: String| {
-                    if let Some(bmp) = &bitmap_for(&text) {
-                        icon_for_menu.set_icon(bmp, &format!("wireutils — {text}"));
-                    }
+                    paint(&text);
                     *last.borrow_mut() = Some(text.clone());
                     // A menu click is the owner asking a direct question and
                     // it deserves an answer even when nothing changed; a
@@ -205,7 +216,7 @@ pub fn run(tunnel: String, url: String) -> i32 {
                         ));
                     }
                     ID_EXIT => {
-                        icon_for_menu.remove_icon();
+                        icon.remove_icon();
                         std::process::exit(0);
                     }
                     other => settle(format!("неизвестный пункт меню: {other}")),
@@ -213,6 +224,16 @@ pub fn run(tunnel: String, url: String) -> i32 {
             });
         }
     });
+
+    // `Some` unless the closure panicked before the startup fetch, and the
+    // paint is worth doing: the main loop is over, but the notification-area
+    // icon outlives it for as long as the process does, and this is the last
+    // chance to leave the truth on it.
+    if let Some((icon, verdict)) = startup.borrow().as_ref() {
+        if let Some(bmp) = bitmap_for(verdict) {
+            icon.set_icon(&bmp, &format!("wireutils — {verdict}"));
+        }
+    }
 
     match outcome {
         Ok(()) => 0,

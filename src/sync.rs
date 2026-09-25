@@ -309,13 +309,17 @@ mod tests {
 
     #[test]
     fn the_store_override_wins() {
+        // The override's spelling has to be the platform's own. A hard-coded
+        // `/tmp/…` is a POSIX path, and `config_path` joins a suffix to it —
+        // so on Windows the assertion would fail on a difference that says
+        // nothing about the code under test. `temp_dir` is the honest stand-in
+        // for "wherever the owner points this". (This test passed here and
+        // failed on CI, which is exactly what a hard-coded separator buys.)
+        let dir = std::env::temp_dir().join("wireutils_store_test");
         let old = std::env::var("WIREUTILS_CONF_STORE").ok();
-        std::env::set_var("WIREUTILS_CONF_STORE", "/tmp/wireutils_store_test");
-        assert_eq!(config_store_dir(), PathBuf::from("/tmp/wireutils_store_test"));
-        assert_eq!(
-            config_path("vasilisa").unwrap(),
-            PathBuf::from("/tmp/wireutils_store_test/vasilisa.conf")
-        );
+        std::env::set_var("WIREUTILS_CONF_STORE", &dir);
+        assert_eq!(config_store_dir(), dir);
+        assert_eq!(config_path("vasilisa").unwrap(), dir.join("vasilisa.conf"));
         match old {
             Some(v) => std::env::set_var("WIREUTILS_CONF_STORE", v),
             None => std::env::remove_var("WIREUTILS_CONF_STORE"),
