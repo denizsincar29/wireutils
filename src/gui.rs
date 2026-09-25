@@ -308,6 +308,7 @@ struct Ui {
     template_list: DataViewListCtrl,
     group_choice: Choice,
     group_add: Button,
+    group_apply: Button,
     group_remove: Button,
     status: StaticText,
 }
@@ -603,6 +604,7 @@ fn build_body(frame: &Frame, shared: &Shared, status_bar: Option<StatusBar>) -> 
         template_list,
         group_choice,
         group_add,
+        group_apply: group_apply_btn,
         group_remove,
         status,
     };
@@ -616,11 +618,6 @@ fn build_body(frame: &Frame, shared: &Shared, status_bar: Option<StatusBar>) -> 
         apply_btn,
         dir_btn,
         import_btn,
-        // The "New group…" button is bound in `build_body` where it is
-        // created and nothing here needs to read it back; it travels in the
-        // signature anyway so the call site has to name every group control
-        // in one place rather than one of them quietly living elsewhere.
-        group_add,
     );
     ui
 }
@@ -643,12 +640,10 @@ fn wire(
     apply_btn: Button,
     dir_btn: Button,
     import_btn: Button,
-    group_apply_btn: Button,
-    // The "New group…" button is bound in `build_body`, where it is created —
-    // it is the one group control that does not go through `Ui`, because
-    // nothing else needs to read it back. Named in the signature anyway so
-    // that reads as a decision and not as an omission.
-    _group_add: Button,
+    // No group buttons are parameters: all three are created outside `wire`,
+    // so they travel in `Ui` and this function reads them back from there.
+    // Passing one of them again alongside `ui` gave the same button two
+    // handles under two names, which is how the last two builds failed.
 ) {
     // --- adding a host ----------------------------------------------------
     {
@@ -738,7 +733,7 @@ fn wire(
     {
         let ui = *ui;
         let shared = shared.clone();
-        group_apply_btn.on_click(move |_| {
+        ui.group_remove.on_click(move |_| {
             let Some(group) = ui.group_choice.get_string_selection() else {
                 ui.set_status("Pick a group from the list first.");
                 return;
@@ -821,7 +816,7 @@ fn wire(
     {
         let ui = *ui;
         let shared = shared.clone();
-        group_apply_btn.on_click(move |_| {
+        ui.group_apply.on_click(move |_| {
             add_selected_to_group(&ui, &shared);
         });
     }
@@ -971,7 +966,7 @@ fn group_menu(ui: &Ui, shared: &Shared, group: &str) {
             &format!("{addresses} address(es) leave the .conf files and the group leaves the list"),
         )
         .build();
-    show(&ui.group_apply_btn, &mut menu);
+    show(&ui.group_remove, &mut menu);
 }
 
 // ---------------------------------------------------------------------------
