@@ -25,6 +25,7 @@ pub mod import;
 pub mod paths;
 pub mod resolve;
 pub mod subtract;
+pub mod sync;
 pub mod templates;
 pub mod wgconf;
 
@@ -35,5 +36,7 @@ pub use templates::Catalog;
 
 #[cfg(feature = "gui")]
 pub mod gui;
+#[cfg(feature = "gui")]
+pub mod tray;
 #[cfg(feature = "gui")]
 pub mod guiassert;

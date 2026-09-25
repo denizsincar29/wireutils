@@ -14,6 +14,7 @@ use wireutils::hosts::HostStore;
 use wireutils::import::{self, Imported, PtrResolver};
 use wireutils::paths;
 use wireutils::resolve::{self, Outcome, SystemResolver};
+use wireutils::sync;
 use wireutils::templates;
 
 const USAGE: &str = "\
@@ -37,12 +38,16 @@ Commands:
   templates [QUERY]        list the catalog, or search it
   templates-update [URL]   fetch a newer catalog from the internet
   import <file.conf>       read a base config's AllowedIPs into the host list
+  conf-fetch <name>        download <name>.conf into the client's config store
+  tunnel <name> on|off     start or stop the tunnel service for a config
   gui                      open the window (only when built with --features gui)
+  tray                     live in the system tray (only with --features gui)
 
 Options:
   -g, --group <name>       group to put a newly added host in
   --force                  re-resolve hosts that already have addresses
   --dry-run                show what apply would write, change nothing
+  --url <base>             base URL for conf-fetch (default: the panel's)
   -h, --help               this text
 ";
 
@@ -115,6 +120,29 @@ fn run(args: &[String]) -> Result<(), String> {
     // handled before anything is read from disk — the GUI does its own
     // loading, and asking it to open a store first would mean opening
     // hosts.json twice.
+    // Same reasoning as the window below: the tray does its own fetching and
+    // has nothing to do with the host list, so it is reached before hosts.json
+    // is opened.
+    if cmd == "tray" {
+        #[cfg(feature = "gui")]
+        {
+            let tunnel = rest_first(&args[1..]).unwrap_or_else(default_tunnel);
+            let url = flag_value(&args, "--url").unwrap_or_else(default_conf_url);
+            let code = wireutils::tray::run(tunnel, url);
+            if code != 0 {
+                return Err(format!("the tray exited with status {code}"));
+            }
+            return Ok(());
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            return Err(
+                "this build has no tray — rebuild with: cargo build --release --features gui"
+                    .to_string(),
+            );
+        }
+    }
+
     if cmd == "gui" {
         #[cfg(feature = "gui")]
         {
@@ -371,7 +399,70 @@ fn run(args: &[String]) -> Result<(), String> {
             );
         }
 
+        "conf-fetch" => {
+            let name = rest.first().ok_or("conf-fetch needs a tunnel name")?;
+            let url = flag_value(&args, "--url").unwrap_or_else(default_conf_url);
+            let install = sync::install(&url, name)?;
+            if install.changed {
+                println!("{}: written", install.path.display());
+                println!("{}", sync::restart_tunnel(name)?);
+            } else {
+                println!("{}: unchanged — the store already had these bytes", install.path.display());
+            }
+        }
+
+        "tunnel" => {
+            let name = rest.first().ok_or("tunnel needs a tunnel name")?;
+            let what = rest.get(1).map(String::as_str).unwrap_or("on");
+            match what {
+                "off" => {
+                    sync::stop_tunnel(name)?;
+                    println!("{name}: stopped");
+                }
+                "on" => {
+                    println!("{name}: {}", sync::restart_tunnel(name)?);
+                }
+                other => return Err(format!("tunnel takes on or off, not {other}")),
+            }
+        }
+
         other => return Err(format!("unknown command {other}\n\n{USAGE}")),
     }
     Ok(())
+}
+
+/// The first argument that is not a flag: `tray` takes a bare tunnel name and
+/// `--url` may come before it, so position alone will not do.
+fn rest_first(args: &[String]) -> Option<String> {
+    args.iter().find(|a| !a.starts_with('-')).cloned()
+}
+
+/// The tunnel the tray keeps current when no name is given. `wireguard` is
+/// what the client calls a config imported under its default name, and a wrong
+/// guess here is visible immediately: the first fetch says the file it looked
+/// for does not exist.
+fn default_tunnel() -> String {
+    if let Ok(name) = std::env::var("WIREUTILS_TUNNEL") {
+        if !name.is_empty() {
+            return name;
+        }
+    }
+    "wireguard".to_string()
+}
+
+/// The value after `--flag`, if the flag is present.
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    let at = args.iter().position(|a| a == flag)?;
+    args.get(at + 1).cloned()
+}
+
+/// Where `conf-fetch` looks when no `--url` is given: the owner's panel, which
+/// serves one `<name>.conf` per recipient.
+fn default_conf_url() -> String {
+    if let Ok(url) = std::env::var("WIREUTILS_CONF_URL") {
+        if !url.is_empty() {
+            return url;
+        }
+    }
+    "https://vpn.denizsincar.ru/conf".to_string()
 }

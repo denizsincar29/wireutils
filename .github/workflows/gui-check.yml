@@ -117,7 +117,9 @@ jobs:
 
       - name: cargo build --release --features gui
         shell: bash
-        run: cargo build --release --features gui --bin wireutils
+        run: |
+          cargo build --release --features gui --bin wireutils
+          cargo build --release --features gui --bin wireutils-tray
 
       # The window is built with the `gui` feature; the CLI bin is built
       # without it so `wireutils-cli.exe` keeps working on a machine that has
@@ -132,6 +134,7 @@ jobs:
           name: wireutils-windows-exe
           path: |
             target/release/wireutils.exe
+            target/release/wireutils-tray.exe
             target/release/wireutils-cli.exe
           if-no-files-found: error
 
@@ -146,5 +149,5 @@ jobs:
             echo
             echo "- commit: ${{ github.sha }}"
             echo "- artifact: \`wireutils-windows-exe\`"
-            ls -l target/release/wireutils.exe target/release/wireutils-cli.exe 2>/dev/null || true
+            ls -l target/release/wireutils.exe target/release/wireutils-tray.exe target/release/wireutils-cli.exe 2>/dev/null || true
           } >> "$GITHUB_STEP_SUMMARY"

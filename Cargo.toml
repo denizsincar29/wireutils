@@ -40,3 +40,12 @@ path = "src/main.rs"
 name = "wireutils"
 path = "src/bin/wireutils.rs"
 required-features = ["gui"]
+
+# The tray icon as its own executable, for the recipients: the one that lives
+# in the notification area and keeps their config current without anyone
+# touching the client machine. Same feature gate as the window, and for the
+# same reason.
+[[bin]]
+name = "wireutils-tray"
+path = "src/bin/wireutils-tray.rs"
+required-features = ["gui"]
