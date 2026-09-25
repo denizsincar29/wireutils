@@ -304,6 +304,7 @@ struct Ui {
     search: SearchCtrl,
     template_list: DataViewListCtrl,
     group_choice: Choice,
+    group_add: Button,
     group_remove: Button,
     status: StaticText,
 }
@@ -600,6 +601,7 @@ fn build_body(frame: &Frame, shared: &Shared, status_bar: Option<StatusBar>) -> 
         search,
         template_list,
         group_choice,
+        group_add,
         group_remove,
         status,
     };
@@ -692,23 +694,23 @@ fn wire(
     {
         let ui = *ui;
         let shared = shared.clone();
-        ui.table.on_right_click(move |event| {
-            // The click has already moved the selection to the row under the
-            // pointer — wx does that before the event — so the menu is about
-            // the row the owner pointed at, not about whatever was selected.
-            // `get_selected_row` is read fresh here rather than from the
-            // event, because the event carries a position and the row index is
-            // what every action below needs.
-            let rows = selected_rows(&ui.table);
-            let Some(row) = ui
-                .table
-                .get_selected_row()
-                .or_else(|| rows.first().copied())
-            else {
-                ui.set_status("Right-click a host row to see its actions.");
-                return;
+        ui.table.on_item_context_menu(move |event| {
+            // `get_row` is what this event carries and it is the row the owner
+            // pointed at, not whatever was selected before — a right-click on
+            // row 5 while row 2 was selected must act on row 5. The fallback is
+            // for the keyboard route (Menu / Shift+F10), which some wx
+            // backends deliver without a row.
+            let row = match event.get_row() {
+                Some(row) if row >= 0 => row as usize,
+                _ => match ui.table.get_selected_row() {
+                    Some(row) => row,
+                    None => {
+                        ui.set_status("Right-click a host row to see its actions.");
+                        return;
+                    }
+                },
             };
-            let host_menu(&ui, &shared, row, event);
+            host_menu(&ui, &shared, row, &event);
         });
     }
 
@@ -716,12 +718,12 @@ fn wire(
     {
         let ui = *ui;
         let shared = shared.clone();
-        ui.group_choice.on_right_click(move |event| {
+        ui.group_choice.on_context_menu(move |event| {
             let Some(group) = ui.group_choice.get_string_selection() else {
                 ui.set_status("Right-click a group in the list to see its actions.");
                 return;
             };
-            group_menu(&ui, &shared, &group, event);
+            group_menu(&ui, &shared, &group, &event);
         });
     }
 
@@ -729,10 +731,16 @@ fn wire(
     {
         let ui = *ui;
         let shared = shared.clone();
-        ui.template_list.on_right_click(move |event| {
-            let Some(row) = ui.template_list.get_selected_row() else {
-                ui.set_status("Right-click a template to add it.");
-                return;
+        ui.template_list.on_item_context_menu(move |event| {
+            let row = match event.get_row() {
+                Some(row) if row >= 0 => row as usize,
+                _ => match ui.template_list.get_selected_row() {
+                    Some(row) => row,
+                    None => {
+                        ui.set_status("Right-click a template to add it.");
+                        return;
+                    }
+                },
             };
             let name = {
                 let st = shared.borrow();
@@ -745,14 +753,14 @@ fn wire(
                     }
                 }
             };
-            let menu = Menu::builder()
+            let mut menu = Menu::builder()
                 .append_item(
                     ID_CTX_TO_GROUP,
                     &format!("Add {name} to the host list"),
                     "The template's groups and addresses become hosts",
                 )
                 .build();
-            ui.template_list.popup_menu(&menu, event.get_position());
+            show(&ui.template_list, &mut menu);
         });
     }
 
@@ -765,7 +773,7 @@ fn wire(
     {
         let ui = *ui;
         let shared = shared.clone();
-        group_add.on_click(move |_| {
+        ui.group_add.on_click(move |_| {
             let typed = match ask_text(
                 &ui,
                 "Name of the new group.\n\nA group is how several subdomains stay one row in the list.",
@@ -793,7 +801,9 @@ fn wire(
     {
         let ui = *ui;
         let shared = shared.clone();
-        group_apply_btn_on(ui, shared);
+        group_apply_btn.on_click(move |_| {
+            add_selected_to_group(&ui, &shared);
+        });
     }
 
     {
@@ -852,17 +862,10 @@ fn wire(
     }
 }
 
-/// "Add selected hosts to group", factored out of `wire` because it is a
-/// button *and* a context-menu item, and there must be exactly one
-/// implementation of it.
-fn group_apply_btn_on(ui: Ui, shared: Shared) {
-    add_selected_to_group(&ui, &shared);
-}
-
 /// The menu for one host row. Built fresh on every right-click, so the items
 /// reflect the row as it is now: an address item appears only when there is an
 /// address to name, and the group items only when there is a group.
-fn host_menu(ui: &Ui, shared: &Shared, row: usize, event: &MouseEventData) {
+fn host_menu(ui: &Ui, shared: &Shared, row: usize, event: &DataViewEvent) {
     let (label, groups, addresses) = {
         let st = shared.borrow();
         match st.store.hosts.get(row) {
@@ -905,13 +908,23 @@ fn host_menu(ui: &Ui, shared: &Shared, row: usize, event: &MouseEventData) {
         }
     }
 
-    let menu = menu.build();
-    ui.table.popup_menu(&menu, event.get_position());
+    let mut menu = menu.build();
+    show(&ui.table, &mut menu);
+}
+
+/// Open a menu for a widget, at the position wx says the click happened.
+///
+/// `popup_menu` lives on the `WxWidget` trait, which every widget derefs to,
+/// and it wants a `&mut Menu` — the builder hands back an owned one, so it has
+/// to be bound to a `mut` local for the duration of the call. All three menus
+/// in this file go through here rather than each repeating the call.
+fn show(widget: &impl WxWidget, menu: &mut Menu) {
+    widget.popup_menu(menu, None);
 }
 
 /// The menu for one group, opened from the group list or from a host row's own
 /// groups. This is where the command the owner could not find lives.
-fn group_menu(ui: &Ui, shared: &Shared, group: &str, event: &MouseEventData) {
+fn group_menu(ui: &Ui, shared: &Shared, group: &str, event: &MenuEventData) {
     let (hosts, addresses) = {
         let st = shared.borrow();
         let hosts = st.store.hosts_in_group(group).count();
@@ -919,7 +932,7 @@ fn group_menu(ui: &Ui, shared: &Shared, group: &str, event: &MouseEventData) {
         (hosts, entries.len())
     };
 
-    let menu = Menu::builder()
+    let mut menu = Menu::builder()
         .append_item(
             ID_CTX_GROUP_REMOVE,
             &format!("Remove group {group}'s addresses from the configs…"),
@@ -937,7 +950,8 @@ fn group_menu(ui: &Ui, shared: &Shared, group: &str, event: &MouseEventData) {
             &format!("{addresses} address(es) leave the .conf files and the group leaves the list"),
         )
         .build();
-    ui.group_choice.popup_menu(&menu, event.get_position());
+    let _ = event;
+    show(&ui.group_choice, &mut menu);
 }
 
 // ---------------------------------------------------------------------------
