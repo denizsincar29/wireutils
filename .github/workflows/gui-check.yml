@@ -90,3 +90,61 @@ jobs:
             check.log
             test.log
           if-no-files-found: warn
+
+  # The executable the owner actually double-clicks. Built here because the
+  # agent's container has no wx and no C toolchain, and because a Windows
+  # machine with a Rust toolchain on it is exactly what this job is running
+  # on. A release build is the point: a debug build shows the console window
+  # and — worse for this program — wxWidgets' own asserts are only live in a
+  # debug build, so a wrong status-bar index would abort the window on the
+  # owner's machine instead of being caught here.
+  build-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-release-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: cargo build --release --features gui
+        shell: bash
+        run: cargo build --release --features gui --bin wireutils
+
+      # The window is built with the `gui` feature; the CLI bin is built
+      # without it so `wireutils-cli.exe` keeps working on a machine that has
+      # no wxWidgets installed. Both come out of the same commit.
+      - name: Build the CLI too, without wx
+        shell: bash
+        run: cargo build --release --bin wireutils-cli
+
+      - name: Upload wireutils.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: wireutils-windows-exe
+          path: |
+            target/release/wireutils.exe
+            target/release/wireutils-cli.exe
+          if-no-files-found: error
+
+      # Printed into the run summary so the owner can read the version of the
+      # file they are about to download without opening it.
+      - name: Name the artifact in the summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### Windows build'
+            echo
+            echo "- commit: ${{ github.sha }}"
+            echo "- artifact: \`wireutils-windows-exe\`"
+            ls -l target/release/wireutils.exe target/release/wireutils-cli.exe 2>/dev/null || true
+          } >> "$GITHUB_STEP_SUMMARY"

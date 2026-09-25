@@ -32,3 +32,11 @@ path = "src/lib.rs"
 [[bin]]
 name = "wireutils-cli"
 path = "src/main.rs"
+
+# The window as its own executable: the one that goes on the desktop. It needs
+# the `gui` feature to be a program at all, so the build is refused without it
+# rather than producing an exe that starts and dies.
+[[bin]]
+name = "wireutils"
+path = "src/bin/wireutils.rs"
+required-features = ["gui"]
