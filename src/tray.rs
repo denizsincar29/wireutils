@@ -166,6 +166,11 @@ pub fn run(tunnel: String, url: String) -> i32 {
             let paint = paint.clone();
             let template = Rc::new(RefCell::new(menu));
             let last = last.clone();
+            // Cloned, not moved: `Timer::new(&*icon)` holds a borrow of the
+            // binding for as long as the app lives, so the closure below may
+            // not take the binding over. The clone is what the menu uses to
+            // tear the icon down on exit.
+            let mine = icon.clone();
             icon.on_menu(move |event| {
                 let settle = |text: String| {
                     paint(&text);
@@ -219,7 +224,7 @@ pub fn run(tunnel: String, url: String) -> i32 {
                         ));
                     }
                     ID_EXIT => {
-                        icon.remove_icon();
+                        mine.remove_icon();
                         std::process::exit(0);
                     }
                     other => settle(format!("неизвестный пункт меню: {other}")),
@@ -232,7 +237,10 @@ pub fn run(tunnel: String, url: String) -> i32 {
     // paint is worth doing: the main loop is over, but the notification-area
     // icon outlives it for as long as the process does, and this is the last
     // chance to leave the truth on it.
-    if let Some((icon, verdict)) = startup.borrow().as_ref() {
+    // Destructured by reference with `ref`, so the cell keeps its copy: the
+    // guards below still hold the `Rc` borrowed, and moving the `Rc` out of a
+    // match arm behind a `Ref` is an error, not an optimisation.
+    if let Some((ref icon, ref verdict)) = *startup.borrow() {
         if let Some(bmp) = bitmap_for(verdict) {
             icon.set_icon(&bmp, &format!("wireutils — {verdict}"));
         }
