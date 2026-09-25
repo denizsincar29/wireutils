@@ -63,11 +63,14 @@ pub fn run(tunnel: String, url: String) -> i32 {
         app.set_exit_on_frame_delete(false);
 
         let mut menu = Menu::builder()
+            // Three arguments, not four: wxdragon's check item has no initial
+            // state to give — it is appended unchecked and `check_item` sets
+            // the mark. The menu is therefore built unchecked and marked
+            // immediately below, before it can be opened.
             .append_check_item(
                 ID_TOGGLE_TUNNEL,
                 "Туннель включён",
                 "Start or stop the tunnel service",
-                true,
             )
             .append_separator()
             .append_item(
@@ -84,6 +87,11 @@ pub fn run(tunnel: String, url: String) -> i32 {
             .append_item(ID_EXIT, "Выход", "Quit the tray")
             .build();
 
+        // The tunnel is started on the very first fetch, so the mark belongs
+        // on from the beginning. `State::running` starts true and this is what
+        // makes the menu agree with it.
+        menu.check_item(ID_TOGGLE_TUNNEL, true);
+
         let icon = TaskBarIcon::builder()
             .with_icon_type(TaskBarIconType::CustomStatusItem)
             .build();
@@ -93,11 +101,13 @@ pub fn run(tunnel: String, url: String) -> i32 {
         let bitmap = ArtProvider::get_bitmap(ArtId::Help, ArtClient::Menu, Some(Size::new(16, 16)));
         icon.set_popup_menu(&mut menu);
         match &bitmap {
-            Some(bmp) => icon.set_icon(bmp, "wireutils"),
-            // No art at all: the notification-area slot will be empty and
-            // there is no tooltip yet to explain it. Establishing the icon
-            // with no bitmap still puts it in the tray, which is the part
-            // that matters.
+            // No art at all: the notification-area slot goes in empty and
+            // there is no tooltip to explain it. Establishing the icon is
+            // still the part that matters, so the `None` arm does nothing
+            // rather than skipping the whole setup.
+            Some(bmp) => {
+                icon.set_icon(bmp, "wireutils");
+            }
             None => {}
         }
 
