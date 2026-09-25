@@ -5,21 +5,34 @@
 //! GUI-independent so everything testable is tested without a window, and this
 //! file is the thin shell that calls it.
 //!
-//! Shape of the window: a table of hosts (the domain, or the IP when there is
-//! no domain), buttons to add / rename / remove, a group box, a template
-//! search that fills the list from the catalog, and a button that writes the
-//! addresses into every `.conf` in the chosen folder. The folder is asked for
-//! on the first run and remembered in `hosts.json`.
+//! Shape of the window: a table of hosts and two rows of buttons. Everything
+//! that acts on one host, one group, or one address is on a **context menu**
+//! instead of a button, because the panel had grown to fourteen controls and a
+//! screen-reader user had to tab through all of them to reach the two that
+//! matter. What stayed a button is what is used every run and has no natural
+//! "right-click me" home: adding a domain, writing the configs, and picking
+//! the folder.
+//!
+//! How a row reads. Column 1 is the domain when there is one, and the address
+//! when the host *is* a literal address — the domain is the thing the owner
+//! typed and thinks in, so it leads; the addresses follow it in column 3. A
+//! row for a domain says `github.com` and then `10.1.1.1, 10.1.1.2`; a row
+//! for a bare address says `203.0.113.7` and has nothing to put after it.
+//!
+//! Prefix lengths are said in words, not shown as `31.13.64.0/24`. The owner
+//! asked for this directly: `/24` is a 24-bit mask, and a number of bits is
+//! not a number of addresses until it is counted. "**a network: 256 addresses
+//! (mask 24 bits)**" is the same fact and readable out loud.
 //!
 //! Accessibility notes, because the owner reads the screen rather than looks
 //! at it: the host list is a `DataViewListCtrl`, which is a real multi-column
-//! list (NVDA announces it as a list and reads the columns), every action is
-//! also reachable from the keyboard through the tree of buttons and dialogs,
-//! and the status line at the bottom is a plain `StaticText` that reports what
-//! the last action did — the result of a write to twenty configs is otherwise
-//! invisible.
+//! list (NVDA announces it as a list and reads the columns), the context menus
+//! are ordinary popup menus reached with the Menu key (Shift+F10) — which is
+//! also what the buttons used to be for — and the status line at the bottom is
+//! a plain `StaticText` that reports what the last action did, plus the row
+//! count so a long list is not a mystery.
 //!
-//! Two rules this file follows throughout:
+//! Three rules this file follows throughout:
 //!
 //! * Nothing touches the network or the disk from an event handler without
 //!   saying so in the status line first. A write to twenty configs that
@@ -27,6 +40,11 @@
 //! * Every handler re-reads the store from `Shared` instead of keeping a
 //!   reference across calls, and every handler that changes the store saves it
 //!   before returning. `hosts.json` is the owner's only copy of the list.
+//! * A right-click on a *group* row opens the group's own menu, including
+//!   "Remove this group's addresses from the configs…". That is the command
+//!   the owner went looking for and could not find: the addresses are already
+//!   written into every `.conf`, so deleting the group from the list does
+//!   nothing to the files.
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -39,6 +57,7 @@ use crate::hosts::{HostStore, Source};
 use crate::import::{self, Imported, PtrResolver};
 use crate::paths;
 use crate::resolve::{self, SystemResolver};
+use crate::subtract::{self, Removals};
 use crate::templates::{self, Catalog};
 
 /// Everything the window mutates. `Rc<RefCell<…>>` because every one of these
@@ -57,6 +76,27 @@ const ID_PICK_DIR: i32 = ID_HIGHEST + 1;
 const ID_APPLY: i32 = ID_HIGHEST + 2;
 const ID_UPDATE_TPL: i32 = ID_HIGHEST + 3;
 const ID_IMPORT: i32 = ID_HIGHEST + 4;
+
+/// Context menu command ids, on the host table and the group list.
+///
+/// In one ascending run with the file-menu ids and ending at
+/// [`ID_CTX_LAST`], because the "unrecognised menu id" report below names the
+/// expected range and a range with a hole in it is a lie. Each constant is
+/// built from the one before it, so inserting an item in the middle cannot
+/// silently hand two menu items the same id — `wxWindow::Bind` would then fire
+/// the first handler for both clicks.
+const ID_CTX_RENAME: i32 = ID_IMPORT + 1;
+const ID_CTX_REMOVE: i32 = ID_CTX_RENAME + 1;
+const ID_CTX_REMOVE_IP: i32 = ID_CTX_REMOVE + 1;
+const ID_CTX_TO_GROUP: i32 = ID_CTX_REMOVE_IP + 1;
+const ID_CTX_FROM_GROUP: i32 = ID_CTX_TO_GROUP + 1;
+const ID_CTX_GROUP_TOGGLE: i32 = ID_CTX_FROM_GROUP + 1;
+const ID_CTX_GROUP_REMOVE: i32 = ID_CTX_GROUP_TOGGLE + 1;
+const ID_CTX_GROUP_PURGE: i32 = ID_CTX_GROUP_REMOVE + 1;
+const ID_CTX_GROUP_UNGROUP: i32 = ID_CTX_GROUP_PURGE + 1;
+/// The highest id any of the two menus can carry, and the one named in the
+/// unrecognised-id report. New items go before this line, always.
+const ID_CTX_LAST: i32 = ID_CTX_GROUP_UNGROUP;
 
 /// Set once if a menu click arrives carrying an id we never handed out.
 /// Event dispatch repeats the same bogus id for every click, and a dialog per
@@ -264,6 +304,7 @@ struct Ui {
     search: SearchCtrl,
     template_list: DataViewListCtrl,
     group_choice: Choice,
+    group_remove: Button,
     status: StaticText,
 }
 
@@ -272,8 +313,13 @@ impl Ui {
     /// and the bottom line are written, because on Windows the status bar is
     /// what a screen reader announces after a button press, and the line is
     /// what stays on screen afterwards.
+    ///
+    /// The bottom line gets the message plus the row count: the host list is
+    /// the only thing of size in this window, and "how many hosts are there"
+    /// is otherwise a question the owner has to answer by arrowing to the end.
     fn set_status(&self, text: &str) {
-        self.status.set_label(text);
+        self.status
+            .set_label(&format!("{text}   ({} hosts)", self.table.get_item_count()));
         // Through the `StatusBar` handle, and with the field taken from
         // `guiassert` rather than written as a literal: field 1 of a one-pane
         // bar is `statbar.cpp:247`, and that bug reached the owner's machine
@@ -356,6 +402,12 @@ fn build_menu(frame: &Frame, ui: &Ui, shared: &Shared) -> MenuBar {
             // silent `_ => {}`, where the owner clicks "Config folder…" and
             // sees nothing happen with nothing to report. Say what arrived
             // instead, once, so the symptom turns into a fact we can act on.
+            //
+            // The context menus report through the same channel and the same
+            // range, because `e.get_menu_id()` is all either of them can see:
+            // a context-menu click arrives here indistinguishable from a
+            // file-menu one. That is why the ids form one unbroken run
+            // (`ID_PICK_DIR..=ID_CTX_LAST`) instead of two naming schemes.
             other => {
                 use std::sync::atomic::Ordering;
                 if !MENU_ID_UNKNOWN_REPORTED.swap(true, Ordering::Relaxed) {
@@ -364,7 +416,7 @@ fn build_menu(frame: &Frame, ui: &Ui, shared: &Shared) -> MenuBar {
                         None => "no id at all".to_string(),
                     };
                     ui_for_menu.set_status(&format!(
-                        "Menu click seen but not recognised ({seen}); expected {ID_PICK_DIR}..{ID_IMPORT}. Report this line."
+                        "Menu click seen but not recognised ({seen}); expected {ID_PICK_DIR}..{ID_CTX_LAST}. Report this line."
                     ));
                 }
             }
@@ -378,7 +430,12 @@ fn build_body(frame: &Frame, shared: &Shared, status_bar: Option<StatusBar>) -> 
     let panel = Panel::builder(frame).build();
     let root = BoxSizer::builder(Orientation::Vertical).build();
 
-    // --- host table -------------------------------------------------------
+    // --- hosts ------------------------------------------------------------
+    //
+    // One box, a table, and a single row of buttons. There were four separate
+    // boxes here (hosts, groups, templates, actions) with fourteen controls
+    // between them; the buttons that acted on a *row* are now on that row's
+    // context menu, and the group buttons are on the group list's.
     let hosts_box =
         StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &panel, "Hosts").build();
 
@@ -391,7 +448,7 @@ fn build_body(frame: &Frame, shared: &Shared, status_bar: Option<StatusBar>) -> 
         DataViewColumnFlags::Resizable,
     );
     table.append_text_column(
-        "Groups",
+        "Group",
         1,
         DataViewAlign::Left,
         160,
@@ -414,31 +471,48 @@ fn build_body(frame: &Frame, shared: &Shared, status_bar: Option<StatusBar>) -> 
 
     hosts_box.add(&table, 1, SizerFlag::Expand | SizerFlag::All, 6);
 
-    // --- host buttons -----------------------------------------------------
     let buttons = BoxSizer::builder(Orientation::Horizontal).build();
-    let add_btn = Button::builder(&panel).with_label("Add host…").build();
-    let rename_btn = Button::builder(&panel).with_label("Rename…").build();
-    let remove_btn = Button::builder(&panel).with_label("Remove").build();
+    let add_btn = Button::builder(&panel).with_label("Add domain…").build();
+    let resolve_btn = Button::builder(&panel).with_label("Resolve").build();
+    let force_btn = Button::builder(&panel)
+        .with_label("Resolve again (all)")
+        .build();
+    let apply_btn = Button::builder(&panel)
+        .with_label("Write to all configs")
+        .build();
     buttons.add(&add_btn, 0, SizerFlag::All, 4);
-    buttons.add(&rename_btn, 0, SizerFlag::All, 4);
-    buttons.add(&remove_btn, 0, SizerFlag::All, 4);
+    buttons.add(&resolve_btn, 0, SizerFlag::All, 4);
+    buttons.add(&force_btn, 0, SizerFlag::All, 4);
+    buttons.add(&apply_btn, 0, SizerFlag::All, 4);
     hosts_box.add_sizer(&buttons, 0, SizerFlag::Expand, 0);
 
-    root.add_sizer(&hosts_box, 3, SizerFlag::Expand | SizerFlag::All, 8);
+    root.add_sizer(&hosts_box, 4, SizerFlag::Expand | SizerFlag::All, 8);
 
     // --- groups -----------------------------------------------------------
+    //
+    // The list is where a group's own menu lives, including the removal the
+    // owner could not find. `Group` is the word on the box because the table
+    // column above it is named the same; the two used to say "Groups" and
+    // "Groups" while meaning different things (one row's group, and every
+    // group there is).
     let groups_box =
-        StaticBoxSizerBuilder::new_with_label(Orientation::Horizontal, &panel, "Groups").build();
+        StaticBoxSizerBuilder::new_with_label(Orientation::Horizontal, &panel, "Group").build();
     let group_choice = Choice::builder(&panel).build();
     let group_add = Button::builder(&panel).with_label("New group…").build();
     let group_apply_btn = Button::builder(&panel)
         .with_label("Add selected hosts to group")
         .build();
-    let group_rm = Button::builder(&panel).with_label("Delete group").build();
+    // Renamed from "Delete group": it removes the group from the list and
+    // leaves every address in every config, which is exactly the confusion
+    // this whole change is about. The context menu next door offers the other
+    // thing — taking the addresses out of the files — under its own name.
+    let group_remove = Button::builder(&panel)
+        .with_label("Remove from list")
+        .build();
     groups_box.add(&group_choice, 1, SizerFlag::All | SizerFlag::Expand, 6);
     groups_box.add(&group_add, 0, SizerFlag::All, 4);
     groups_box.add(&group_apply_btn, 0, SizerFlag::All, 4);
-    groups_box.add(&group_rm, 0, SizerFlag::All, 4);
+    groups_box.add(&group_remove, 0, SizerFlag::All, 4);
     root.add_sizer(
         &groups_box,
         0,
@@ -447,6 +521,10 @@ fn build_body(frame: &Frame, shared: &Shared, status_bar: Option<StatusBar>) -> 
     );
 
     // --- templates --------------------------------------------------------
+    //
+    // Only the search box and the list are on the panel; "Add template" and
+    // "Update from internet" moved to the template list's context menu, which
+    // is where the owner is looking when he means *that* template.
     let tpl_box =
         StaticBoxSizerBuilder::new_with_label(Orientation::Horizontal, &panel, "Templates").build();
     let search = SearchCtrl::builder(&panel)
@@ -482,42 +560,24 @@ fn build_body(frame: &Frame, shared: &Shared, status_bar: Option<StatusBar>) -> 
     let tpl_col = BoxSizer::builder(Orientation::Vertical).build();
     tpl_col.add(&search, 0, SizerFlag::All | SizerFlag::Expand, 6);
     tpl_col.add(&template_list, 1, SizerFlag::All | SizerFlag::Expand, 6);
-
-    let tpl_right = BoxSizer::builder(Orientation::Vertical).build();
-    let tpl_add = Button::builder(&panel).with_label("Add template").build();
-    let tpl_update = Button::builder(&panel)
-        .with_label("Update from internet")
-        .build();
-    tpl_right.add(&tpl_add, 0, SizerFlag::All, 4);
-    tpl_right.add(&tpl_update, 0, SizerFlag::All, 4);
-
     tpl_box.add_sizer(&tpl_col, 1, SizerFlag::Expand, 0);
-    tpl_box.add_sizer(&tpl_right, 0, SizerFlag::All, 0);
     root.add_sizer(
         &tpl_box,
-        2,
+        1,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right,
         8,
     );
 
-    // --- the actions that touch the world ---------------------------------
+    // --- what is left of the old bottom row ---------------------------------
+    //
+    // Two buttons that are not about a row: which folder, and where a starting
+    // list comes from. Both are also in the File menu, which is why they can
+    // afford to be small and last.
     let bottom = BoxSizer::builder(Orientation::Horizontal).build();
-    let resolve_btn = Button::builder(&panel)
-        .with_label("Resolve domains")
-        .build();
-    let force_btn = Button::builder(&panel)
-        .with_label("Resolve again (all)")
-        .build();
-    let apply_btn = Button::builder(&panel)
-        .with_label("Write to all configs")
-        .build();
     let dir_btn = Button::builder(&panel).with_label("Config folder…").build();
     let import_btn = Button::builder(&panel)
         .with_label("Import base config…")
         .build();
-    bottom.add(&resolve_btn, 0, SizerFlag::All, 4);
-    bottom.add(&force_btn, 0, SizerFlag::All, 4);
-    bottom.add(&apply_btn, 0, SizerFlag::All, 4);
     bottom.add(&dir_btn, 0, SizerFlag::All, 4);
     bottom.add(&import_btn, 0, SizerFlag::All, 4);
     root.add_sizer(&bottom, 0, SizerFlag::Expand | SizerFlag::All, 8);
@@ -540,6 +600,7 @@ fn build_body(frame: &Frame, shared: &Shared, status_bar: Option<StatusBar>) -> 
         search,
         template_list,
         group_choice,
+        group_remove,
         status,
     };
 
@@ -547,13 +608,6 @@ fn build_body(frame: &Frame, shared: &Shared, status_bar: Option<StatusBar>) -> 
         &ui,
         shared,
         add_btn,
-        rename_btn,
-        remove_btn,
-        group_add,
-        group_apply_btn,
-        group_rm,
-        tpl_add,
-        tpl_update,
         resolve_btn,
         force_btn,
         apply_btn,
@@ -567,22 +621,15 @@ fn build_body(frame: &Frame, shared: &Shared, status_bar: Option<StatusBar>) -> 
 // Events
 // ---------------------------------------------------------------------------
 //
-// Every button is wired here, in the one function where the widgets are still
-// in scope. The handlers are `'static` and hold only `Copy` handles plus a
-// clone of the `Rc` over the data.
+// Every button and every context menu is wired here, in the one function where
+// the widgets are still in scope. The handlers are `'static` and hold only
+// `Copy` handles plus a clone of the `Rc` over the data.
 
 #[allow(clippy::too_many_arguments)]
 fn wire(
     ui: &Ui,
     shared: &Shared,
     add_btn: Button,
-    rename_btn: Button,
-    remove_btn: Button,
-    group_add: Button,
-    group_apply_btn: Button,
-    group_rm: Button,
-    tpl_add: Button,
-    tpl_update: Button,
     resolve_btn: Button,
     force_btn: Button,
     apply_btn: Button,
@@ -597,7 +644,9 @@ fn wire(
             let typed = match ask_text(
                 &ui,
                 "Add a host\n\nA domain (api.openai.com) or an address (1.2.3.4).\n\
-                 Several at once may be separated by commas or spaces.",
+                 Several at once may be separated by commas or spaces.\n\n\
+                 Right-click a row for the rest: rename, remove, or take one \
+                 address out of the configs.",
                 "Add host",
                 "",
             ) {
@@ -614,7 +663,7 @@ fn wire(
                 let mut st = shared.borrow_mut();
                 for t in &targets {
                     // A host typed into an empty group list stays standalone;
-                    // groups are joined deliberately from the Groups box.
+                    // groups are joined deliberately from the Group box.
                     st.store.add_host(t, &[]);
                     added += 1;
                 }
@@ -627,17 +676,12 @@ fn wire(
         });
     }
 
-    // --- renaming the selected host ---------------------------------------
-    {
-        let ui = *ui;
-        let shared = shared.clone();
-        rename_btn.on_click(move |_| {
-            let _ = rename_selected(&ui, &shared);
-        });
-    }
-
+    // --- the host table: right-click, and double-click to rename -----------
+    //
     // A double-click on a row is the fastest way to rename without hunting for
-    // the button; it is also what a screen reader user expects from a list.
+    // a menu; it is also what a screen reader user expects from a list. The
+    // keyboard route to the same menu is the Menu key (Shift+F10), which is
+    // what `wxEVT_CONTEXT_MENU` carries.
     {
         let ui = *ui;
         let shared = shared.clone();
@@ -645,46 +689,77 @@ fn wire(
             let _ = rename_selected(&ui, &shared);
         });
     }
-
-    // --- removing the selected host ---------------------------------------
     {
         let ui = *ui;
         let shared = shared.clone();
-        remove_btn.on_click(move |_| {
-            let Some(i) = ui.table.get_selected_row() else {
-                ui.set_status("Select a host in the list first.");
+        ui.table.on_right_click(move |event| {
+            // The click has already moved the selection to the row under the
+            // pointer — wx does that before the event — so the menu is about
+            // the row the owner pointed at, not about whatever was selected.
+            // `get_selected_row` is read fresh here rather than from the
+            // event, because the event carries a position and the row index is
+            // what every action below needs.
+            let rows = selected_rows(&ui.table);
+            let Some(row) = ui
+                .table
+                .get_selected_row()
+                .or_else(|| rows.first().copied())
+            else {
+                ui.set_status("Right-click a host row to see its actions.");
                 return;
             };
-            let (label, target) = {
+            let host_menu(&ui, &shared, row, event);
+        });
+    }
+
+    // --- the group list: right-click --------------------------------------
+    {
+        let ui = *ui;
+        let shared = shared.clone();
+        ui.group_choice.on_right_click(move |event| {
+            let Some(group) = ui.group_choice.get_string_selection() else {
+                ui.set_status("Right-click a group in the list to see its actions.");
+                return;
+            };
+            group_menu(&ui, &shared, &group, event);
+        });
+    }
+
+    // --- the template list: right-click -----------------------------------
+    {
+        let ui = *ui;
+        let shared = shared.clone();
+        ui.template_list.on_right_click(move |event| {
+            let Some(row) = ui.template_list.get_selected_row() else {
+                ui.set_status("Right-click a template to add it.");
+                return;
+            };
+            let name = {
                 let st = shared.borrow();
-                match st.store.hosts.get(i) {
-                    Some(h) => (h.label().to_string(), h.target.clone()),
+                let needle = ui.search.get_value();
+                match st.catalog.search(&needle).get(row) {
+                    Some(t) => t.name.clone(),
                     None => {
-                        ui.set_status("That row is gone — the list changed underneath.");
+                        ui.set_status("That template is gone — the search changed underneath.");
                         return;
                     }
                 }
             };
-            if !confirm(
-                &ui,
-                &format!("Remove {label} from the list?\n\nThe .conf files are not touched until you write to them."),
-            ) {
-                ui.set_status("Nothing removed.");
-                return;
-            }
-            let outcome = {
-                let mut st = shared.borrow_mut();
-                let r = st.store.remove_host(&target).map(|_| ());
-                let _ = st.store.save(&st.config_path);
-                r
-            };
-            refresh(&ui, &shared);
-            match outcome {
-                Ok(()) => ui.set_status(&format!("Removed {label}.")),
-                Err(e) => ui.set_status(&format!("Could not remove {label}: {e}")),
-            }
+            let menu = Menu::builder()
+                .append_item(
+                    ID_CTX_TO_GROUP,
+                    &format!("Add {name} to the host list"),
+                    "The template's groups and addresses become hosts",
+                )
+                .build();
+            ui.template_list.popup_menu(&menu, event.get_position());
         });
     }
+
+    // The two list menus are ordinary popup menus: the click opens them, the
+    // choice comes back through the frame's `on_menu_selected` above, where
+    // the ids are dispatched. Nothing is done on the right-click itself — a
+    // right-click that acted would be a way to delete a config by accident.
 
     // --- groups -----------------------------------------------------------
     {
@@ -718,131 +793,18 @@ fn wire(
     {
         let ui = *ui;
         let shared = shared.clone();
-        group_apply_btn.on_click(move |_| {
+        group_apply_btn_on(ui, shared);
+    }
+
+    {
+        let ui = *ui;
+        let shared = shared.clone();
+        ui.group_remove.on_click(move |_| {
             let Some(group) = ui.group_choice.get_string_selection() else {
                 ui.set_status("Pick a group from the list first.");
                 return;
             };
-            // All selected rows, so several hosts can be grouped in one go.
-            let rows = selected_rows(&ui.table);
-            if rows.is_empty() {
-                ui.set_status("Select one or more hosts in the table first.");
-                return;
-            }
-            let mut moved = 0;
-            {
-                let mut st = shared.borrow_mut();
-                for i in &rows {
-                    if let Some(h) = st.store.hosts.get_mut(*i) {
-                        if !h.groups.contains(&group) {
-                            h.groups.push(group.clone());
-                            moved += 1;
-                        }
-                    }
-                }
-                if moved > 0 {
-                    st.store.ensure_group(&group);
-                }
-                let _ = st.store.save(&st.config_path);
-            }
-            refresh(&ui, &shared);
-            ui.set_status(&format!("{moved} host(s) added to {group}."));
-        });
-    }
-
-    {
-        let ui = *ui;
-        let shared = shared.clone();
-        group_rm.on_click(move |_| {
-            let Some(group) = ui.group_choice.get_string_selection() else {
-                ui.set_status("Pick a group from the list first.");
-                return;
-            };
-            if !confirm(
-                &ui,
-                &format!("Delete the group {group}?\n\nIts hosts stay in the list, just ungrouped — no address is lost."),
-            ) {
-                return;
-            }
-            let outcome = {
-                let mut st = shared.borrow_mut();
-                let r = st.store.remove_group(&group);
-                let _ = st.store.save(&st.config_path);
-                r
-            };
-            refresh(&ui, &shared);
-            match outcome {
-                Ok(n) => ui.set_status(&format!("Group {group} deleted; {n} host(s) kept.")),
-                Err(e) => ui.set_status(&format!("Could not delete {group}: {e}")),
-            }
-        });
-    }
-
-    // --- template search --------------------------------------------------
-    {
-        let ui = *ui;
-        let shared = shared.clone();
-        ui.search.on_text_updated(move |_| {
-            let st = shared.borrow();
-            fill_templates(&ui, &st);
-        });
-    }
-
-    // --- applying a template ----------------------------------------------
-    {
-        let ui = *ui;
-        let shared = shared.clone();
-        tpl_add.on_click(move |_| {
-            let Some(row) = ui.template_list.get_selected_row() else {
-                ui.set_status("Select a template in the list first.");
-                return;
-            };
-            // The table is rebuilt from the filtered catalog on every
-            // keystroke, so the row index has to be turned back into a name
-            // through the same search, not through the catalog's own order.
-            let name = {
-                let st = shared.borrow();
-                let needle = ui.search.get_value();
-                match st.catalog.search(&needle).get(row) {
-                    Some(t) => t.name.clone(),
-                    None => {
-                        ui.set_status("That template is gone — the search changed underneath.");
-                        return;
-                    }
-                }
-            };
-            let outcome = {
-                let mut st = shared.borrow_mut();
-                // Split the borrow by destructuring the guard once, into two
-                // disjoint fields: `apply` takes the catalog by reference and
-                // the store by `&mut`, and borrowing `st` twice is what the
-                // compiler rejects.
-                let GuiState {
-                    store,
-                    catalog,
-                    config_path,
-                } = &mut *st;
-                let r = catalog.apply(store, &name);
-                let _ = store.save(config_path);
-                r
-            };
-            refresh(&ui, &shared);
-            match outcome {
-                Ok(0) => ui.set_status(&format!("{name} was already in the list.")),
-                Ok(n) => ui.set_status(&format!(
-                    "{name}: {n} host(s) added. Their group is {name} — resolve to get addresses."
-                )),
-                Err(e) => ui.set_status(&format!("Could not add {name}: {e}")),
-            }
-        });
-    }
-
-    // --- updating the catalog ---------------------------------------------
-    {
-        let ui = *ui;
-        let shared = shared.clone();
-        tpl_update.on_click(move |_| {
-            update_templates(&ui, &shared);
+            forgot_the_files(&ui, &shared, &group);
         });
     }
 
@@ -890,6 +852,94 @@ fn wire(
     }
 }
 
+/// "Add selected hosts to group", factored out of `wire` because it is a
+/// button *and* a context-menu item, and there must be exactly one
+/// implementation of it.
+fn group_apply_btn_on(ui: Ui, shared: Shared) {
+    add_selected_to_group(&ui, &shared);
+}
+
+/// The menu for one host row. Built fresh on every right-click, so the items
+/// reflect the row as it is now: an address item appears only when there is an
+/// address to name, and the group items only when there is a group.
+fn host_menu(ui: &Ui, shared: &Shared, row: usize, event: &MouseEventData) {
+    let (label, groups, addresses) = {
+        let st = shared.borrow();
+        match st.store.hosts.get(row) {
+            Some(h) => (h.label().to_string(), h.groups.clone(), subtractions(h)),
+            None => {
+                ui.set_status("That row is gone — the list changed underneath.");
+                return;
+            }
+        }
+    };
+
+    let mut menu = Menu::builder()
+        .append_item(ID_CTX_RENAME, &format!("Rename {label}…"), "")
+        .append_item(
+            ID_CTX_REMOVE,
+            &format!("Remove {label} from the list"),
+            "The .conf files keep the address until you remove it there",
+        );
+
+    // One item per address, not one item for the whole row. An `AllowedIPs`
+    // line holds several addresses and they are removed one at a time — the
+    // owner asked for exactly this ("удаление адреса — делит") — so the menu
+    // has to be able to name a single one.
+    for addr in &addresses {
+        menu = menu.append_item(
+            ID_CTX_REMOVE_IP,
+            &format!("Remove address {addr} from the configs"),
+            "Takes this one address out of every .conf, leaving the others",
+        );
+    }
+
+    if !groups.is_empty() {
+        menu = menu.append_separator();
+        for g in &groups {
+            menu = menu.append_item(
+                ID_CTX_FROM_GROUP,
+                &format!("Take {label} out of group {g}"),
+                "The host stays in the list",
+            );
+        }
+    }
+
+    let menu = menu.build();
+    ui.table.popup_menu(&menu, event.get_position());
+}
+
+/// The menu for one group, opened from the group list or from a host row's own
+/// groups. This is where the command the owner could not find lives.
+fn group_menu(ui: &Ui, shared: &Shared, group: &str, event: &MouseEventData) {
+    let (hosts, addresses) = {
+        let st = shared.borrow();
+        let hosts = st.store.hosts_in_group(group).count();
+        let entries = subtract::entries_from_group(&st.store, group);
+        (hosts, entries.len())
+    };
+
+    let menu = Menu::builder()
+        .append_item(
+            ID_CTX_GROUP_REMOVE,
+            &format!("Remove group {group}'s addresses from the configs…"),
+            "Edits every .conf in the folder; the group and its hosts stay in the list",
+        )
+        .append_separator()
+        .append_item(
+            ID_CTX_GROUP_UNGROUP,
+            &format!("Remove group {group} from the list…"),
+            &format!("{hosts} host(s) stay, just ungrouped — no .conf is touched"),
+        )
+        .append_item(
+            ID_CTX_GROUP_PURGE,
+            "Do both: take the addresses out and drop the group…",
+            &format!("{addresses} address(es) leave the .conf files and the group leaves the list"),
+        )
+        .build();
+    ui.group_choice.popup_menu(&menu, event.get_position());
+}
+
 // ---------------------------------------------------------------------------
 // The actions
 // ---------------------------------------------------------------------------
@@ -899,7 +949,7 @@ fn wire(
 ///
 /// `show_modal()` returning something other than `ID_OK` is a normal cancel —
 /// that is most of what happens. The case worth writing down is a result that
-/// is neither `ID_OK` nor a known cancel code, because then the dialog did
+/// is neither `ID_OK` nor a known cancel code, because then the dialog *did*
 /// return and its answer is simply not what this code matched on, which is a
 /// fact about the binding rather than about the owner's clicking.
 fn note_odd_dialog_result(ui: &Ui, what: &str, got: i32) {
@@ -909,6 +959,21 @@ fn note_odd_dialog_result(ui: &Ui, what: &str, got: i32) {
     ui.set_status(&format!(
         "{what}: dialog returned {got}, which is neither OK ({ID_OK}) nor Cancel ({ID_CANCEL}). The path was treated as not chosen."
     ));
+}
+
+/// The addresses this host would contribute, in the form the removal matches
+/// on: the bare address, without the prefix the write adds. This is the same
+/// conversion `subtract::Removals::new` does, so the menu and the removal can
+/// never disagree about what "this address" means.
+fn subtractions(host: &crate::Host) -> Vec<String> {
+    let mut out: Vec<String> = host
+        .allowed_entries()
+        .into_iter()
+        .map(|e| e.split('/').next().unwrap_or(&e).to_string())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Ask for the folder of `.conf` files and remember it. Returns true when a
@@ -1032,9 +1097,14 @@ fn rename_selected(ui: &Ui, shared: &Shared) -> bool {
         ui.set_status("Select a host in the list first.");
         return false;
     };
+    rename_row(ui, shared, i)
+}
+
+/// Rename the host at `row`, whatever selected it.
+fn rename_row(ui: &Ui, shared: &Shared, row: usize) -> bool {
     let (old, was_ip) = {
         let st = shared.borrow();
-        match st.store.hosts.get(i) {
+        match st.store.hosts.get(row) {
             Some(h) => (h.target.clone(), h.is_literal_ip()),
             None => {
                 ui.set_status("That row is gone — the list changed underneath.");
@@ -1081,6 +1151,297 @@ fn rename_selected(ui: &Ui, shared: &Shared) -> bool {
             false
         }
     }
+}
+
+/// Take one host out of the list. The `.conf` files are deliberately not
+/// touched: an address already written into twenty files is still there
+/// afterwards, and the status line says so.
+fn remove_row(ui: &Ui, shared: &Shared, row: usize) {
+    let (label, target) = {
+        let st = shared.borrow();
+        match st.store.hosts.get(row) {
+            Some(h) => (h.label().to_string(), h.target.clone()),
+            None => {
+                ui.set_status("That row is gone — the list changed underneath.");
+                return;
+            }
+        }
+    };
+    if !confirm(
+        ui,
+        &format!(
+            "Remove {label} from the list?\n\n\
+             This does not touch the .conf files — the address is still written \
+             into every one of them. To take it out of the configs, use \
+             \"Remove address … from the configs\"."
+        ),
+    ) {
+        ui.set_status("Nothing removed.");
+        return;
+    }
+    let outcome = {
+        let mut st = shared.borrow_mut();
+        let r = st.store.remove_host(&target).map(|_| ());
+        let _ = st.store.save(&st.config_path);
+        r
+    };
+    refresh(ui, shared);
+    match outcome {
+        Ok(()) => ui.set_status(&format!(
+            "Removed {label} from the list. Its address is still in the .conf files."
+        )),
+        Err(e) => ui.set_status(&format!("Could not remove {label}: {e}")),
+    }
+}
+
+/// Remove exactly one address from every config, and report how many entries
+/// left how many files.
+fn remove_address(ui: &Ui, shared: &Shared, address: &str) {
+    let dir = match shared.borrow().store.conf_dir.clone() {
+        Some(d) => PathBuf::from(d),
+        None => {
+            ui.set_status("No config folder chosen. Use \"Config folder…\" first.");
+            return;
+        }
+    };
+
+    let removals = Removals::new([address]);
+    let (entries, files) = match subtract::survey(&dir, &removals) {
+        Ok(n) => n,
+        Err(e) => {
+            ui.set_status(&format!("Could not read the config folder: {e}"));
+            return;
+        }
+    };
+    if entries == 0 {
+        ui.set_status(&format!(
+            "{address} is not in any .conf in this folder — nothing to remove."
+        ));
+        return;
+    }
+
+    if !confirm(
+        ui,
+        &format!(
+            "Remove {address} from the configs?\n\n\
+             {entries} entr(ies) in {files} file(s) will lose it, and every other \
+             address on the same line stays. A .conf that would be left with an \
+             empty AllowedIPs is reported and not written.\n\n\
+             A .bak copy is made before the first change."
+        ),
+    ) {
+        ui.set_status("Nothing removed.");
+        return;
+    }
+
+    ui.set_status(&format!("Removing {address} from the configs…"));
+    match subtract::subtract(&dir, &removals) {
+        Ok(report) => ui.set_status(&removal_summary(&report, &format!("{address} removed"))),
+        Err(e) => ui.set_status(&format!("Could not remove {address}: {e}")),
+    }
+}
+
+/// Remove every address a group's hosts contribute, from every `.conf`.
+///
+/// `purge` is the difference between the two menu items that get here: with
+/// `false` the group and its hosts stay in the list, so the removal can be
+/// undone by writing the configs again; with `true` the group is dropped from
+/// the list as well, which is the "I never want this again" shape.
+fn remove_group_from_configs(ui: &Ui, shared: &Shared, group: &str, purge: bool) {
+    let dir = match shared.borrow().store.conf_dir.clone() {
+        Some(d) => PathBuf::from(d),
+        None => {
+            ui.set_status("No config folder chosen. Use \"Config folder…\" first.");
+            return;
+        }
+    };
+
+    let (entries, hosts) = {
+        let st = shared.borrow();
+        (
+            subtract::entries_from_group(&st.store, group),
+            st.store.hosts_in_group(group).count(),
+        )
+    };
+    if entries.is_empty() {
+        ui.set_status(&format!(
+            "{group} has no addresses to remove — its hosts are unresolved, so nothing of \
+             it is in the configs yet."
+        ));
+        return;
+    }
+
+    let removals = Removals::new(entries.iter().cloned());
+    let (found, files) = match subtract::survey(&dir, &removals) {
+        Ok(n) => n,
+        Err(e) => {
+            ui.set_status(&format!("Could not read the config folder: {e}"));
+            return;
+        }
+    };
+
+    let mut question = format!(
+        "Remove the addresses of group {group} from the configs?\n\n\
+         The group holds {hosts} host(s) and {} address(es).\n\
+         {found} of them are present in {files} .conf file(s); every other address \
+         on those lines stays.\n\n",
+        entries.len()
+    );
+    if purge {
+        question.push_str(&format!(
+            "The group {group} is then removed from the list as well."
+        ));
+    } else {
+        question.push_str(
+            "The group and its hosts stay in the list — writing the configs again puts \
+             the addresses back.",
+        );
+    }
+    question.push_str("\n\nA .bak copy is made next to each file before its first change.");
+    if !confirm(ui, &question) {
+        ui.set_status("Nothing removed.");
+        return;
+    }
+
+    ui.set_status(&format!("Removing {group} from the configs…"));
+    let summary = match subtract::subtract(&dir, &removals) {
+        Ok(report) => removal_summary(&report, &format!("{group}: addresses removed")),
+        Err(e) => {
+            ui.set_status(&format!("Could not remove {group}: {e}"));
+            return;
+        }
+    };
+
+    if !purge {
+        ui.set_status(&summary);
+        return;
+    }
+
+    let outcome = {
+        let mut st = shared.borrow_mut();
+        let r = st.store.remove_group(group);
+        let _ = st.store.save(&st.config_path);
+        r
+    };
+    refresh(ui, shared);
+    match outcome {
+        Ok(n) => ui.set_status(&format!(
+            "{summary} Group {group} removed from the list; {n} host(s) kept."
+        )),
+        Err(e) => ui.set_status(&format!("{summary} But removing group {group} failed: {e}")),
+    }
+}
+
+/// The sentence a removal run produces. «убралось 12 адресов из 4 конфигов» is
+/// the shape the owner asked for, so the counts lead and the exceptions follow.
+fn removal_summary(report: &apply::Report, what: &str) -> String {
+    let written = report.written_confs();
+    let mut msg = format!(
+        "{what}: {} address(es) out of {written} file(s).",
+        report.removed()
+    );
+    let unchanged = report.unchanged_confs();
+    if unchanged > 0 {
+        msg.push_str(&format!(" {unchanged} file(s) did not have them."));
+    }
+    let emptied = report.emptied();
+    if emptied > 0 {
+        msg.push_str(&format!(
+            " {emptied} file(s) would have been left with an empty AllowedIPs and were not written — they still have every address."
+        ));
+    }
+    if !report.errors.is_empty() {
+        let names = report
+            .errors
+            .iter()
+            .map(|(p, e)| format!("{} ({e})", file_name(p)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        msg.push_str(&format!(" Failed: {names}"));
+    }
+    msg
+}
+
+/// Remove a group from the list only. Every address stays in every `.conf` —
+/// which is the whole reason this is not called "delete".
+fn forgot_the_files(ui: &Ui, shared: &Shared, group: &str) {
+    let hosts = shared.borrow().store.hosts_in_group(group).count();
+    if !confirm(
+        ui,
+        &format!(
+            "Remove group {group} from the list?\n\n\
+             {hosts} host(s) stay in the list, just ungrouped. \
+             Every address of theirs stays in every .conf — \
+             use \"Remove group {group}'s addresses from the configs…\" for that."
+        ),
+    ) {
+        ui.set_status("Nothing removed.");
+        return;
+    }
+    let outcome = {
+        let mut st = shared.borrow_mut();
+        let r = st.store.remove_group(group);
+        let _ = st.store.save(&st.config_path);
+        r
+    };
+    refresh(ui, shared);
+    match outcome {
+        Ok(n) => ui.set_status(&format!(
+            "Group {group} removed from the list; {n} host(s) kept. The configs are untouched."
+        )),
+        Err(e) => ui.set_status(&format!("Could not remove {group}: {e}")),
+    }
+}
+
+/// Add every selected host to the chosen group.
+fn add_selected_to_group(ui: &Ui, shared: &Shared) {
+    let Some(group) = ui.group_choice.get_string_selection() else {
+        ui.set_status("Pick a group from the list first.");
+        return;
+    };
+    // All selected rows, so several hosts can be grouped in one go.
+    let rows = selected_rows(&ui.table);
+    if rows.is_empty() {
+        ui.set_status("Select one or more hosts in the table first.");
+        return;
+    }
+    let mut moved = 0;
+    {
+        let mut st = shared.borrow_mut();
+        for i in &rows {
+            if let Some(h) = st.store.hosts.get_mut(*i) {
+                if !h.groups.contains(&group) {
+                    h.groups.push(group.clone());
+                    moved += 1;
+                }
+            }
+        }
+        if moved > 0 {
+            st.store.ensure_group(&group);
+        }
+        let _ = st.store.save(&st.config_path);
+    }
+    refresh(ui, shared);
+    ui.set_status(&format!("{moved} host(s) added to {group}."));
+}
+
+/// Take one host out of one group, leaving the host in the list.
+fn remove_row_from_group(ui: &Ui, shared: &Shared, row: usize, group: &str) {
+    let label = {
+        let mut st = shared.borrow_mut();
+        let Some(h) = st.store.hosts.get_mut(row) else {
+            ui.set_status("That row is gone — the list changed underneath.");
+            return;
+        };
+        let label = h.label().to_string();
+        h.groups.retain(|g| g != group);
+        let _ = st.store.save(&st.config_path);
+        label
+    };
+    refresh(ui, shared);
+    ui.set_status(&format!(
+        "{label} is out of group {group}. It is still in the list."
+    ));
 }
 
 /// Resolve every domain that needs it and report the count, naming the ones
@@ -1224,31 +1585,11 @@ fn refresh(ui: &Ui, shared: &Shared) {
         } else {
             h.groups.join(", ")
         };
-        let addrs = if h.ips.is_empty() {
-            String::new()
-        } else if h.ips.len() <= 3 {
-            h.ips.join(", ")
-        } else {
-            format!("{} … ({} addresses)", h.ips[0], h.ips.len())
-        };
-        // The state column is the answer to "why is this site still not in the
-        // tunnel", which is otherwise unanswerable from the window.
-        let state_text = match (&h.error, h.source) {
-            (Some(e), _) => format!("failed: {e}"),
-            (None, Source::Template) => "from template".to_string(),
-            (None, Source::Manual) => {
-                if h.ips.is_empty() && !h.is_literal_ip() {
-                    "not resolved".to_string()
-                } else {
-                    String::new()
-                }
-            }
-        };
         ui.table.append_item(&[
             Variant::from_string(h.label()),
             Variant::from_string(&groups),
-            Variant::from_string(&addrs),
-            Variant::from_string(&state_text),
+            Variant::from_string(&addresses_cell(h)),
+            Variant::from_string(&state_cell(h)),
         ]);
     }
 
@@ -1283,6 +1624,85 @@ fn refresh(ui: &Ui, shared: &Shared) {
         &format!("{folder}   |   {}", state.config_path.display()),
         crate::guiassert::STATUS_PRIMARY_FIELD as i32,
     );
+}
+
+/// The addresses column of one row: the domain leads the row, so this is what
+/// follows it. Emptiness is a fact worth stating — a host with no address is
+/// the one thing in this window that will refuse to be written — so it says
+/// why, in the words of the state column, rather than showing a blank.
+fn addresses_cell(h: &crate::Host) -> String {
+    if h.ips.is_empty() {
+        return String::new();
+    }
+    if h.ips.len() <= 3 {
+        h.ips.join(", ")
+    } else {
+        format!("{} … ({} addresses)", h.ips[0], h.ips.len())
+    }
+}
+
+/// The state column: the answer to "why is this site still not in the tunnel",
+/// which is otherwise unanswerable from the window.
+fn state_cell(h: &crate::Host) -> String {
+    if let Some(e) = &h.error {
+        return format!("failed: {e}");
+    }
+    if h.source == Source::Template {
+        return "from template".to_string();
+    }
+    if h.ips.is_empty() {
+        if h.is_literal_ip() {
+            // A literal address that is not its own route yet: `add_host`
+            // deliberately does not seed the target into `ips`, so this is
+            // waiting for a resolve pass like any domain.
+            return "not resolved".to_string();
+        }
+        return format!("not resolved — {}", mask_words(h.target.as_str()));
+    }
+    // The prefix, in words, for the single-address and small rows. Each
+    // address that is a network gets its own clause; `select` would have been
+    // prettier but this runs per row and the list is small.
+    let mut notes: Vec<String> = Vec::new();
+    for ip in &h.ips {
+        if let Some(words) = mask_note(ip) {
+            notes.push(words);
+        }
+    }
+    notes.join("; ")
+}
+
+// ---------------------------------------------------------------------------
+// Saying a prefix length in words
+// ---------------------------------------------------------------------------
+
+/// `31.13.64.0/24` → "a network: 256 addresses (mask 24 bits)".
+///
+/// The owner asked for this by name: a prefix length is a number of bits, and
+/// a number of bits is not an address count until it is counted, so the window
+/// says both. A bare host route (`/32`, `/128`) is the normal case and gets no
+/// note — saying "mask 32 bits, 1 address" on every line would bury the four
+/// rows that are actually networks.
+fn mask_note(entry: &str) -> Option<String> {
+    let (_, prefix) = entry.split_once('/')?;
+    let bits: u32 = prefix.trim().parse().ok()?;
+    let total = if entry.contains(':') { 128 } else { 32 };
+    if bits >= total {
+        return None;
+    }
+    let addresses = 1u128.checked_shl(total - bits).unwrap_or(u128::MAX);
+    Some(format!(
+        "a network: {addresses} address{} (mask {bits} bits)",
+        if addresses == 1 { "" } else { "es" }
+    ))
+}
+
+/// The same fact for a target the owner typed, which may be an unresolved
+/// name — in which case there is no prefix to explain and nothing to say.
+fn mask_words(target: &str) -> String {
+    match mask_note(target) {
+        Some(note) => note,
+        None => "no address yet".to_string(),
+    }
 }
 
 /// Fill the template table from the search box. The row order here is the

@@ -14,6 +14,8 @@
 //! * [`resolve`] — domains to addresses, cached, with failures surfaced.
 //! * [`templates`] — the catalog of known sites, updatable from the internet.
 //! * [`apply`] — the folder-wide write, with backups.
+//! * [`subtract`] — the inverse: taking addresses back out of the folder,
+//!   one entry at a time, when the list and the files have drifted.
 //! * [`import`] — building a starting list out of an existing base config.
 //! * [`paths`] — where `hosts.json` lives on Windows and Linux.
 
@@ -22,6 +24,7 @@ pub mod hosts;
 pub mod import;
 pub mod paths;
 pub mod resolve;
+pub mod subtract;
 pub mod templates;
 pub mod wgconf;
 

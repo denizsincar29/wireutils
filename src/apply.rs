@@ -15,39 +15,94 @@ use std::path::{Path, PathBuf};
 use crate::hosts::{Error, HostStore, Result};
 use crate::wgconf::WgConfig;
 
-/// What one file's write did.
+/// What a *removal* pass did to one file, and what a write did to it — the two
+/// are one enum because the pass reports both, and a caller that has to know
+/// which of the two it is holding would be asking about the caller, not the
+/// file.
+///
+/// The count is on every variant and not just the written one: a removal takes
+/// entries out of a line whose other entries stay, and "how many came out" is
+/// the thing that tells the owner the run did what they asked — «убралось 12
+/// адресов из 4 конфигов» is the sentence they wanted. `apply` fills the count
+/// with 1 or 0 because it replaces the whole value, where the only question is
+/// whether anything changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FileResult {
-    /// The value was already correct; nothing was written.
-    Unchanged,
-    /// The value was replaced.
-    Written { backup: Option<PathBuf> },
-    /// The file has no `AllowedIPs` line, so there is nowhere to put the
-    /// list. Reported, never invented — adding a `[Peer]` to a file that
-    /// has none is a guess about the owner's tunnel.
-    NoAllowedIps,
+pub enum ConfResult {
+    /// The line was already free of every entry being removed.
+    Unchanged { removed: usize },
+    /// Entries were taken out; the rest of the line stands.
+    Written {
+        removed: usize,
+        backup: Option<PathBuf>,
+    },
+    /// Every entry on the line was being removed, so the line would have been
+    /// left empty. Not written: see `subtract` for why an empty `AllowedIPs`
+    /// is worse than an unchanged one.
+    Emptied { removed: usize },
+    /// No `AllowedIPs` line at all, so there was nothing to remove from.
+    NoAllowedIps { removed: usize },
 }
 
 #[derive(Debug, Clone)]
 pub struct Report {
-    pub files: Vec<(PathBuf, FileResult)>,
+    pub files: Vec<(PathBuf, ConfResult)>,
     /// Non-fatal problems: an unreadable file, a write that failed. The pass
     /// continues so one broken config does not stop the other nineteen.
     pub errors: Vec<(PathBuf, String)>,
 }
 
 impl Report {
+    /// Files the write changed.
     pub fn written(&self) -> usize {
         self.files
             .iter()
-            .filter(|(_, r)| matches!(r, FileResult::Written { .. }))
+            .filter(|(_, r)| matches!(r, ConfResult::Written { .. }))
             .count()
     }
+
+    /// Files the write found already correct.
     pub fn unchanged(&self) -> usize {
         self.files
             .iter()
-            .filter(|(_, r)| *r == FileResult::Unchanged)
+            .filter(|(_, r)| matches!(r, ConfResult::Unchanged { .. }))
             .count()
+    }
+
+    /// Entries taken out across the folder, over the removal pass's results.
+    pub fn removed(&self) -> usize {
+        self.confs()
+            .map(|r| match r {
+                ConfResult::Unchanged { removed }
+                | ConfResult::Written { removed, .. }
+                | ConfResult::Emptied { removed }
+                | ConfResult::NoAllowedIps { removed } => *removed,
+            })
+            .sum()
+    }
+
+    /// Files a removal did not have to touch.
+    pub fn unchanged_confs(&self) -> usize {
+        self.confs()
+            .filter(|r| matches!(r, ConfResult::Unchanged { .. }))
+            .count()
+    }
+
+    /// Files a removal wrote.
+    pub fn written_confs(&self) -> usize {
+        self.confs()
+            .filter(|r| matches!(r, ConfResult::Written { .. }))
+            .count()
+    }
+
+    /// Files left alone because the removal would have emptied them.
+    pub fn emptied(&self) -> usize {
+        self.confs()
+            .filter(|r| matches!(r, ConfResult::Emptied { .. }))
+            .count()
+    }
+
+    fn confs(&self) -> impl Iterator<Item = &ConfResult> {
+        self.files.iter().map(|(_, r)| r)
     }
 }
 
@@ -153,14 +208,18 @@ pub fn apply_value(dir: &Path, value: &str) -> Result<Report> {
         };
         let mut conf = WgConfig::parse(&text);
         if !conf.has_allowed_ips() {
-            report.files.push((path, FileResult::NoAllowedIps));
+            report
+                .files
+                .push((path, ConfResult::NoAllowedIps { removed: 0 }));
             continue;
         }
         let before = conf.to_string();
         conf.set_allowed_ips(value);
         let after = conf.to_string();
         if before == after {
-            report.files.push((path, FileResult::Unchanged));
+            report
+                .files
+                .push((path, ConfResult::Unchanged { removed: 0 }));
             continue;
         }
         let backup = match write_with_backup(&path, &after) {
@@ -170,7 +229,9 @@ pub fn apply_value(dir: &Path, value: &str) -> Result<Report> {
                 continue;
             }
         };
-        report.files.push((path, FileResult::Written { backup }));
+        report
+            .files
+            .push((path, ConfResult::Written { removed: 1, backup }));
     }
     Ok(report)
 }
@@ -178,7 +239,7 @@ pub fn apply_value(dir: &Path, value: &str) -> Result<Report> {
 /// Write `text` to `path`, saving the previous content to `path.bak` the
 /// first time — an existing `.bak` is the owner's, or an earlier rescue, and
 /// is not overwritten.
-fn write_with_backup(path: &Path, text: &str) -> std::io::Result<Option<PathBuf>> {
+pub(crate) fn write_with_backup(path: &Path, text: &str) -> std::io::Result<Option<PathBuf>> {
     let bak = path.with_extension("conf.bak");
     let backup = if bak.exists() {
         None
@@ -250,7 +311,7 @@ mod tests {
         std::fs::write(dir.join("a.conf"), CONF).unwrap();
         let report = apply_value(&dir, "1.2.3.4/32").unwrap();
         let bak = match &report.files[0].1 {
-            FileResult::Written { backup } => backup.clone().unwrap(),
+            ConfResult::Written { backup, .. } => backup.clone().unwrap(),
             other => panic!("{other:?}"),
         };
         assert_eq!(std::fs::read_to_string(bak).unwrap(), CONF);
@@ -273,7 +334,7 @@ mod tests {
         let dir = tmpdir("no_allowed");
         std::fs::write(dir.join("a.conf"), "[Interface]\nPrivateKey = x\n").unwrap();
         let report = apply_value(&dir, "1.2.3.4/32").unwrap();
-        assert_eq!(report.files[0].1, FileResult::NoAllowedIps);
+        assert_eq!(report.files[0].1, ConfResult::NoAllowedIps { removed: 0 });
         assert_eq!(
             std::fs::read_to_string(dir.join("a.conf")).unwrap(),
             "[Interface]\nPrivateKey = x\n"
