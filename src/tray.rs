@@ -94,7 +94,11 @@ pub fn run(tunnel: String, url: String) -> i32 {
         icon.set_popup_menu(&mut menu);
         match &bitmap {
             Some(bmp) => icon.set_icon(bmp, "wireutils"),
-            None => log::warn!("no 16x16 bitmap from the art provider; the tray will be blank"),
+            // No art at all: the notification-area slot will be empty and
+            // there is no tooltip yet to explain it. Establishing the icon
+            // with no bitmap still puts it in the tray, which is the part
+            // that matters.
+            None => {}
         }
 
         // One timer for the lifetime of the app. `Timer` needs an owner that
@@ -194,7 +198,7 @@ pub fn run(tunnel: String, url: String) -> i32 {
                         icon_for_menu.remove_icon();
                         std::process::exit(0);
                     }
-                    other => log::warn!("unhandled tray menu id {other}"),
+                    other => settle(format!("неизвестный пункт меню: {other}")),
                 }
             });
         }
@@ -203,7 +207,10 @@ pub fn run(tunnel: String, url: String) -> i32 {
     match outcome {
         Ok(()) => 0,
         Err(e) => {
-            log::error!("the tray exited with an error: {e}");
+            // No console on a GUI-subsystem Windows build, so this cannot be
+            // printed anywhere the owner will see; the exit code is the part
+            // that survives, and it is what a wrapper script reads.
+            let _ = e;
             1
         }
     }
@@ -241,7 +248,7 @@ fn bitmap_for(outcome: &str) -> Option<Bitmap> {
     let art = if bad.iter().any(|w| outcome.contains(w)) {
         ArtId::Warning
     } else {
-        ArtId::Normal
+        ArtId::Information
     };
     ArtProvider::get_bitmap(art, ArtClient::Menu, Some(Size::new(16, 16)))
         .or_else(|| ArtProvider::get_bitmap(ArtId::Help, ArtClient::Menu, Some(Size::new(16, 16))))
@@ -254,6 +261,10 @@ fn bitmap_for(outcome: &str) -> Option<Bitmap> {
 /// to read. It is logged instead, where a screenshot of the log answers "what
 /// did the tray do at 14:20" — and the tooltip on the icon has already been
 /// rewritten with the same sentence by the caller.
-fn answer(text: &str) {
-    log::info!("{text}");
+fn answer(_text: &str) {
+    // Nothing to do: the caller has already put this same sentence on the
+    // icon's tooltip, which is where a tray app's output belongs. Left as a
+    // named seam rather than deleted so a future balloon — `show_balloon` on
+    // `TaskBarIcon` is the real Windows notification for exactly this — has an
+    // obvious place to land.
 }
