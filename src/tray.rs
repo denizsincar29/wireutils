@@ -243,7 +243,7 @@ pub fn run(tunnel: String, url: String) -> i32 {
     // partial move the match performs. Taking the value outright ends the
     // borrow first, and there is nothing left to read it afterwards anyway.
     if let Some((icon, verdict)) = startup.borrow_mut().take() {
-        if let Some(bmp) = bitmap_for(verdict) {
+        if let Some(bmp) = bitmap_for(&verdict) {
             icon.set_icon(&bmp, &format!("wireutils — {verdict}"));
         }
     }
